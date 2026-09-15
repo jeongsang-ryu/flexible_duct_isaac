@@ -88,10 +88,10 @@ def describe(doc):
 def posts(doc):
     """The posts the ducts route around, as [(x, y, radius), ...].
 
-    These are obstacles in the world, not points on a duct. The planner lets
-    you drop them on the floor and the duct wraps around them; in the scene
-    they become static colliders that hold the duct's shape exactly the same
-    way, so what you arranged in 2-D survives into the simulation.
+    A PLANNER DEVICE. They exist to shape the centreline while it is dragged
+    in 2-D -- the duct wraps around them the way a rope wraps a peg. Once the
+    run is drawn, the hoop positions already carry that shape, so the scene
+    does not need them and does not build them unless asked.
     """
     out = []
     for a in doc.get("anchors", []) or []:

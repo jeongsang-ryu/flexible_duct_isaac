@@ -46,6 +46,10 @@ ap.add_argument("--layout", default="",
                 help="track JSON exported from the planner: builds one duct "
                      "per drawn run, following the centreline")
 ap.add_argument("--ground", type=float, default=40.0, help="ground plane size [m]")
+ap.add_argument("--posts", action="store_true",
+                help="also build the planner's posts as static colliders. Off "
+                     "by default: they shape the layout in 2-D and the drawn "
+                     "centreline already carries the result.")
 ap.add_argument("--perf-every", type=int, default=0,
                 help="print ms/step and GPU memory every N steps")
 ap.add_argument("--frame", action="store_true",
@@ -416,9 +420,12 @@ if args.layout:
     print(f"[build] layout {args.layout}", flush=True)
     print(describe(_doc), flush=True)
 
-    # posts first: they are static colliders the ducts settle against, the same
-    # obstacles they were routed around in the planner
-    for _pi, (_px, _py, _pr) in enumerate(posts(_doc)):
+    # POSTS ARE A PLANNER DEVICE, NOT SCENE GEOMETRY. They exist to shape the
+    # centreline while you drag it in 2-D; once the run is drawn, the hoop
+    # positions already carry that shape, so nothing has to hold it up in the
+    # simulation. Building them by default just added 27 colliders and a row of
+    # obstacles nobody asked for. --posts puts them in if you do want them.
+    for _pi, (_px, _py, _pr) in enumerate(posts(_doc) if args.posts else []):
         _pp = f"/World/post_{_pi:02d}"
         _cyl = UsdGeom.Cylinder.Define(stage, _pp)
         _cyl.CreateAxisAttr("Z")
@@ -428,8 +435,11 @@ if args.layout:
         UsdGeom.Xformable(_cyl).AddTranslateOp().Set(Gf.Vec3d(_px, _py, 0.4))
         UsdPhysics.CollisionAPI.Apply(_cyl.GetPrim())
     _np_posts = len(posts(_doc))
-    if _np_posts:
+    if args.posts and _np_posts:
         print(f"[build] {_np_posts} static post(s) placed", flush=True)
+    elif _np_posts:
+        print(f"[build] {_np_posts} planner post(s) ignored (layout aid only; "
+              f"--posts builds them)", flush=True)
     for _i, _run in enumerate(_doc["runs"]):
         _st = resample(_run.get("points", []), _sp)
         if len(_st) < 2:

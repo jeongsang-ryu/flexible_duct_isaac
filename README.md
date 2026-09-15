@@ -19,7 +19,8 @@ bending under a sideways pull.
 
 **1 — lay it out.** Open `tools/track_planner.html` in a browser. No install, no
 network. Spawn ducts at a fixed length, drag them like a worm, drop posts they
-have to route around.
+have to route around. Posts are a shaping aid only — the drawn centreline
+carries the result, so the scene does not build them.
 
 <p align="center">
   <img src="docs/planner.png" width="88%" alt="The 2-D planner: metre grid, a 6 m duct, arena and duct controls">
