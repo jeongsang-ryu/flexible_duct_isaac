@@ -26,7 +26,8 @@ from pxr import Gf, Sdf, UsdGeom, UsdPhysics, Vt
 
 from omni.physx.scripts.ifaces import get_physx_attachment_private_interface
 
-from duct_sim.geometry import create_ring, create_ring_visual
+from duct_sim import geometry as _geom
+from duct_sim.geometry import create_ring, create_ring_visual, bind_look
 
 
 def create_seam(stage, seam_path, cloth_path, rigid_path,
@@ -125,7 +126,7 @@ def spawn_duct_single(
     taut: bool = False,
     surface_sampling: float = 0.02,
     ring_colour=(0.03, 0.03, 0.03),
-    cloth_colour=(0.95, 0.80, 0.10),
+    cloth_colour=(0.78, 0.60, 0.05),
     anchor_ends: bool = False,
     verbose: bool = True,
 ):
@@ -175,6 +176,7 @@ def spawn_duct_single(
         xf.AddOrientOp().Set(Gf.Quatf(q.GetQuat()))
         for seg in prim.GetChildren():
             UsdGeom.Gprim(seg).CreateDisplayColorAttr().Set([Gf.Vec3f(*ring_colour)])
+            bind_look(stage, seg, ring_colour, roughness=_geom.RING_ROUGHNESS, ior=_geom.RING_IOR)
         if rib_visual:
             # hide the capsule chain and draw a proper torus instead. The
             # capsules stay as the collider; only what you SEE changes.
@@ -235,6 +237,7 @@ def spawn_duct_single(
     m.CreateFaceVertexIndicesAttr(Vt.IntArray(np.array(tris).flatten().tolist()))
     m.CreateDoubleSidedAttr(True)
     m.CreateDisplayColorAttr().Set([Gf.Vec3f(*cloth_colour)])
+    bind_look(stage, m, cloth_colour, roughness=_geom.CLOTH_ROUGHNESS, ior=_geom.CLOTH_IOR)
     if smooth_render:
         # Render-only smoothing. The solver still sees the coarse triangles;
         # this just stops a 28-sided tube reading as a faceted prism, and takes
@@ -343,7 +346,7 @@ def spawn_duct(
     heading_deg: float = 0.0,
     n_circ: int = 28,
     ring_colour=(0.03, 0.03, 0.03),
-    cloth_colour=(0.95, 0.80, 0.10),
+    cloth_colour=(0.78, 0.60, 0.05),
     anchor_ends: bool = False,
     overlap_offset: float = 0.006,
     filtering_offset: float = 0.012,
@@ -373,6 +376,7 @@ def spawn_duct(
         xf.AddOrientOp().Set(Gf.Quatf(q.GetQuat()))
         for seg in prim.GetChildren():
             UsdGeom.Gprim(seg).CreateDisplayColorAttr().Set([Gf.Vec3f(*ring_colour)])
+            bind_look(stage, seg, ring_colour, roughness=_geom.RING_ROUGHNESS, ior=_geom.RING_IOR)
         if rib_visual:
             # hide the capsule chain and draw a proper torus instead. The
             # capsules stay as the collider; only what you SEE changes.
@@ -419,6 +423,7 @@ def spawn_duct(
         m.CreateFaceVertexIndicesAttr(Vt.IntArray(np.array(tris).flatten().tolist()))
         m.CreateDoubleSidedAttr(True)
         m.CreateDisplayColorAttr().Set([Gf.Vec3f(*cloth_colour)])
+        bind_look(stage, m, cloth_colour, roughness=_geom.CLOTH_ROUGHNESS, ior=_geom.CLOTH_IOR)
 
         if not deformableUtils.create_auto_surface_deformable_hierarchy(
                 stage, root_prim_path=sroot, simulation_mesh_path=f"{sroot}/simMesh",
@@ -555,7 +560,7 @@ def spawn_duct_path(
     taut: bool = False,             # measured to have no effect; see create_seam
     surface_sampling: float = 0.02,
     ring_colour=(0.03, 0.03, 0.03),
-    cloth_colour=(0.95, 0.80, 0.10),
+    cloth_colour=(0.78, 0.60, 0.05),
     verbose: bool = True,
 ):
     """A duct that FOLLOWS a drawn centreline instead of running straight.
@@ -592,6 +597,7 @@ def spawn_duct_path(
         xf.AddOrientOp().Set(Gf.Quatf(q.GetQuat()))
         for seg in prim.GetChildren():
             UsdGeom.Gprim(seg).CreateDisplayColorAttr().Set([Gf.Vec3f(*ring_colour)])
+            bind_look(stage, seg, ring_colour, roughness=_geom.RING_ROUGHNESS, ior=_geom.RING_IOR)
             if rib_visual:
                 UsdGeom.Imageable(seg).CreateVisibilityAttr().Set("invisible")
         UsdPhysics.RigidBodyAPI.Apply(prim)
@@ -649,6 +655,7 @@ def spawn_duct_path(
     m.CreateFaceVertexIndicesAttr(Vt.IntArray(np.array(tris).flatten().tolist()))
     m.CreateDoubleSidedAttr(True)
     m.CreateDisplayColorAttr().Set([Gf.Vec3f(*cloth_colour)])
+    bind_look(stage, m, cloth_colour, roughness=_geom.CLOTH_ROUGHNESS, ior=_geom.CLOTH_IOR)
     if smooth_render:
         m.CreateSubdivisionSchemeAttr().Set("catmullClark")
 
@@ -791,7 +798,7 @@ def spawn_duct_rigid(
     solver_vel_iters: int = 4,
     sleep_threshold: float = 0.005,
     ring_colour=(0.03, 0.03, 0.03),
-    cloth_colour=(0.95, 0.80, 0.10),
+    cloth_colour=(0.78, 0.60, 0.05),
     verbose: bool = True,
 ):
     """A duct made ONLY of rigid bodies: black discs and yellow sleeves, hinged.
@@ -843,6 +850,7 @@ def spawn_duct_rigid(
         d.CreateRadiusAttr(float(R))
         d.CreateHeightAttr(float(disc_thickness))
         d.CreateDisplayColorAttr().Set([Gf.Vec3f(*ring_colour)])
+        bind_look(stage, d, ring_colour, roughness=_geom.RING_ROUGHNESS, ior=_geom.RING_IOR)
         _place(d.GetPrim(), x, y, h)
         UsdPhysics.CollisionAPI.Apply(d.GetPrim())
         UsdPhysics.RigidBodyAPI.Apply(d.GetPrim())
@@ -861,6 +869,7 @@ def spawn_duct_rigid(
             s.CreateRadiusAttr(float(R - sleeve_inset))
             s.CreateHeightAttr(float(length))
             s.CreateDisplayColorAttr().Set([Gf.Vec3f(*cloth_colour)])
+            bind_look(stage, s, cloth_colour, roughness=_geom.CLOTH_ROUGHNESS, ior=_geom.CLOTH_IOR)
             _place(s.GetPrim(), (x + x1) * 0.5, (y + y1) * 0.5, h + dh * 0.5)
             UsdPhysics.CollisionAPI.Apply(s.GetPrim())
             UsdPhysics.RigidBodyAPI.Apply(s.GetPrim())
@@ -937,7 +946,7 @@ def spawn_duct_static(
     rib_period: float = 0.10,
     capsule_collider: bool = True,
     capsule_every: float = 0.25,
-    colour=(0.95, 0.80, 0.10),
+    colour=(0.78, 0.60, 0.05),
     rib_colour=(0.03, 0.03, 0.03),
     verbose: bool = True,
 ):
@@ -966,6 +975,7 @@ def spawn_duct_static(
     mesh.CreateFaceVertexIndicesAttr(Vt.IntArray(np.array(tris).flatten().tolist()))
     mesh.CreateDoubleSidedAttr(True)
     mesh.CreateDisplayColorAttr().Set([Gf.Vec3f(*colour)])
+    bind_look(stage, mesh, colour, roughness=_geom.CLOTH_ROUGHNESS, ior=_geom.CLOTH_IOR)
 
     n_col = 0
     if capsule_collider:
@@ -1086,7 +1096,7 @@ class HybridSkin:
 
 def spawn_duct_hybrid(stage, index, stations, spec, n_circ=20,
                       rib_amp=0.012, rib_period=0.10, skin_every=2,
-                      colour=(0.95, 0.80, 0.10), verbose=True, **rigid_kw):
+                      colour=(0.78, 0.60, 0.05), verbose=True, **rigid_kw):
     """Rigid chain for physics, separate ribbed tube for the eye."""
     root, paths, n_bodies, n_joints = spawn_duct_rigid(
         stage, index, stations, spec, verbose=False, **rigid_kw)
@@ -1105,6 +1115,7 @@ def spawn_duct_hybrid(stage, index, stations, spec, n_circ=20,
     mesh.CreateFaceVertexIndicesAttr(Vt.IntArray(np.array(tris).flatten().tolist()))
     mesh.CreateDoubleSidedAttr(True)
     mesh.CreateDisplayColorAttr().Set([Gf.Vec3f(*colour)])
+    bind_look(stage, mesh, colour, roughness=_geom.CLOTH_ROUGHNESS, ior=_geom.CLOTH_IOR)
 
     skin = HybridSkin(stage, mp, paths, n_circ, spec.radius,
                       rib_amp, rib_period, skin_every)
@@ -1127,7 +1138,7 @@ def spawn_duct_fem(
     ring_every: float = 0.0,
     ring_tube: float = 0.010,
     ring_density: float = 300.0,
-    colour=(0.95, 0.80, 0.10),
+    colour=(0.78, 0.60, 0.05),
     ring_colour=(0.03, 0.03, 0.03),
     verbose: bool = True,
 ):
@@ -1171,6 +1182,7 @@ def spawn_duct_fem(
     m.CreateFaceVertexCountsAttr(Vt.IntArray([3] * len(tris)))
     m.CreateFaceVertexIndicesAttr(Vt.IntArray(np.array(tris).flatten().tolist()))
     m.CreateDisplayColorAttr().Set([Gf.Vec3f(*colour)])
+    bind_look(stage, m, colour, roughness=_geom.CLOTH_ROUGHNESS, ior=_geom.CLOTH_IOR)
 
     ok = deformableUtils.create_auto_volume_deformable_hierarchy(
         stage,

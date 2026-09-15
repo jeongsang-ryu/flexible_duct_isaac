@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import math
 
-from pxr import Gf, Usd, UsdGeom, UsdPhysics, Vt
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, Vt
 
 
 def ring_segment_transforms(radius: float, n_seg: int):
@@ -149,4 +149,76 @@ def create_ring_visual(stage, path, radius, tube_radius,
     mesh.CreateFaceVertexIndicesAttr(
         Vt.IntArray(np.array(tris, dtype=np.int32).flatten().tolist()))
     mesh.CreateDisplayColorAttr().Set([Gf.Vec3f(*colour)])
+    bind_look(stage, mesh, colour, roughness=RING_ROUGHNESS, ior=RING_IOR)
     return mesh
+
+
+# --- looks ------------------------------------------------------------------
+# Everything above sets only `displayColor`. A prim with no bound material gets
+# the renderer's default surface, which is smooth and specular -- so the duct
+# reads as polished rubber no matter what colour it is. Real ducting fabric is
+# matte: it scatters almost everything and has no visible highlight. That is
+# one parameter (roughness) plus killing the specular lobe.
+
+_LOOKS: dict[tuple, str] = {}
+
+# Tunable from the CLI. 0.97 is fabric (matte, no highlight); 0.55 is the
+# painted-metal look kept for the hoops so they still read as a hard part.
+CLOTH_ROUGHNESS = 1.0
+RING_ROUGHNESS = 0.55
+# Index of refraction drives UsdPreviewSurface's dielectric highlight. 1.5 is
+# coated plastic. Woven fabric has essentially no smooth interface, so the
+# highlight has to go away entirely -- roughness alone only WIDENS it, which is
+# why a rough surface with ior 1.5 still reads as rubber.
+CLOTH_IOR = 1.02
+RING_IOR = 1.45
+
+
+def matte_look(stage, colour, roughness=0.95, metallic=0.0, ior=1.2):
+    """Return the path of a shared UsdPreviewSurface for this colour/roughness.
+
+    Cached per (stage, colour, roughness): a track has thousands of meshes and
+    they must not each author their own material.
+    """
+    key = (stage, tuple(round(c, 4) for c in colour), round(roughness, 3),
+           round(metallic, 3), round(ior, 3))
+    hit = _LOOKS.get(key)
+    if hit is not None:
+        return hit
+
+    from pxr import UsdShade
+    r, g, b = colour
+    name = "look_%02x%02x%02x_r%02d_i%03d" % (int(r * 255), int(g * 255), int(b * 255),
+                                             int(roughness * 99), int(ior * 100))
+    path = "/World/Looks/" + name
+    if not stage.GetPrimAtPath(path):
+        mat = UsdShade.Material.Define(stage, path)
+        sh = UsdShade.Shader.Define(stage, path + "/surface")
+        sh.CreateIdAttr("UsdPreviewSurface")
+        sh.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*colour))
+        sh.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(float(roughness))
+        sh.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(float(metallic))
+        # UsdPreviewSurface's dielectric highlight is driven by ior, not by a
+        # specular colour. 1.2 is well below cloth-coated-in-gloss (1.5) and
+        # leaves only a faint sheen at grazing angles, which fabric does have.
+        sh.CreateInput("ior", Sdf.ValueTypeNames.Float).Set(float(ior))
+        sh.CreateInput("specularColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(0.01, 0.01, 0.01))
+        mat.CreateSurfaceOutput().ConnectToSource(sh.ConnectableAPI(), "surface")
+    _LOOKS[key] = path
+    return path
+
+
+def bind_look(stage, prim, colour, roughness=0.95, metallic=0.0, ior=1.2):
+    """Bind a matte material. `prim` may be a UsdPrim, a schema object or a path."""
+    from pxr import UsdShade
+    if isinstance(prim, str):
+        prim = stage.GetPrimAtPath(prim)
+    elif hasattr(prim, "GetPrim"):
+        prim = prim.GetPrim()
+    if not prim or not prim.IsValid():
+        return ""
+    path = matte_look(stage, colour, roughness, metallic, ior)
+    mat = UsdShade.Material.Get(stage, path)
+    if mat:
+        UsdShade.MaterialBindingAPI.Apply(prim).Bind(mat)
+    return path

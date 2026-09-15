@@ -40,6 +40,12 @@ ap.add_argument("--spacing", type=float, default=0.05,
                      "this doubles the hoop and sleeve count per metre")
 ap.add_argument("--height", type=float, default=0.5, help="spawn height [m]")
 ap.add_argument("--n-circ", type=int, default=28)
+ap.add_argument("--cloth-roughness", type=float, default=0.97,
+                help="fabric surface roughness: 1.0 = pure matte cloth, "
+                     "0.3 = glossy rubber. Prims with no bound material get "
+                     "the renderer default, which looks like rubber.")
+ap.add_argument("--ring-roughness", type=float, default=0.55,
+                help="hoop surface roughness (0.55 = painted metal)")
 ap.add_argument("--out", default="/home/js/hmcl_issac_project/duct_sim/layouts/track.usd")
 ap.add_argument("--load", default="")
 ap.add_argument("--layout", default="",
@@ -71,6 +77,10 @@ ap.add_argument("--taut", action="store_true",
                      "always preserve the gap they were built with, so the "
                      "fabric does not move. Kept so the result stays "
                      "reproducible (scripts/test_taut.py).")
+ap.add_argument("--shrink-rest", type=float, default=0.0,
+                help="cloth build: narrow the fabric's REST cross-section to "
+                     "this factor a few steps in, so it pulls itself tight "
+                     "against the hoops. 0.8 is a strong pull; 0 = off.")
 ap.add_argument("--surface-sampling", type=float, default=0.02,
                 help="--taut: spacing of attachment points sampled on the hoop")
 ap.add_argument("--fem-rings", type=float, default=0.0,
@@ -160,6 +170,7 @@ ap.add_argument("--spawn-on-start", type=int, default=1,
                 help="how many ducts to create immediately")
 args = ap.parse_args()
 
+
 from isaacsim import SimulationApp  # noqa: E402
 
 app = SimulationApp({"headless": False})
@@ -179,6 +190,14 @@ from duct_sim.builder import (min_segments, rebuild_seams, spawn_duct,  # noqa: 
                                spawn_duct_static)
 from duct_sim.freeze import freeze_to_usd  # noqa: E402
 from duct_sim.spec import DuctSpec  # noqa: E402
+from duct_sim import geometry as _geom  # noqa: E402
+
+# MUST be after SimulationApp: duct_sim.geometry imports pxr at module level,
+# and importing pxr before Kit starts leaves its extensions half-registered
+# ("extension class wrapper for base class ... has not been created yet") and
+# then segfaults ~2.7 s in. Nothing about setting a float needs to happen early.
+_geom.CLOTH_ROUGHNESS = args.cloth_roughness
+_geom.RING_ROUGHNESS = args.ring_roughness
 from isaacsim.core.api import SimulationContext  # noqa: E402
 
 ctx = omni.usd.get_context()
@@ -728,6 +747,27 @@ while app.is_running():
         v = state["pending_filtering"]
         state["pending_filtering"] = None
         _apply_filtering_now(v)
+
+    if args.shrink_rest > 0 and step == 150 and not state.get("shrunk"):
+        state["shrunk"] = True
+        state["dragger"] = None          # stale GPU views across stop/play
+        try:
+            from duct_sim.plastic import shrink_rest_shape
+            n = shrink_rest_shape(stage, factor=args.shrink_rest, axis=0)
+            sim.stop()
+            sim.play()
+            print(f"[build] rest cross-section narrowed to "
+                  f"{args.shrink_rest:.2f} on {n} sleeve(s)", flush=True)
+        except Exception as exc:
+            import traceback
+            print(f"[build] shrink failed: {exc}", flush=True)
+            traceback.print_exc()
+            try:
+                sim.play()
+            except Exception:
+                pass
+        finally:
+            _refresh_dragger()
 
     if state["pending_bake"]:
         state["pending_bake"] = False

@@ -205,3 +205,85 @@ def bake_and_restart(stage=None, sim=None, verbose=True):
         print("[plastic] NOTE no sim handle given: stop/play the simulation "
               "for the bake to take effect", flush=True)
     return n
+
+
+def shrink_rest_shape(stage=None, factor=0.85, axis=0, verbose=True):
+    """Make the fabric WANT to be narrower than it is, so it pulls tight.
+
+    The other route -- drawing the fabric inside the hoops and constraining it
+    as if it touched them -- cannot work: an attachment records the gap it was
+    built with and preserves it, measured at 146.0 mm with and without
+    enableRigidSurfaceAttachments. Tension has to come from the rest state
+    instead of from the constraint.
+
+    So: leave the fabric where it is, and rewrite its REST shape to a narrower
+    tube. The solver then pulls every vertex inward; the hoops block that at
+    each station, so the fabric goes taut over them and cinches between --
+    which is the corrugated profile of real ducting.
+
+    Only the cross-section is shrunk, not the length. Scaling the rest shape
+    uniformly would shorten the duct too and drag the hoops together, since
+    nothing joins them but the fabric.
+
+    `axis` is the index of the duct's long axis (0 = x). Points are binned along
+    it and scaled about each bin's own centre, so this needs no knowledge of how
+    the cooked mesh happens to be ordered.
+    """
+    stage = stage or omni.usd.get_context().get_stage()
+    n_done = 0
+    for prim in stage.Traverse():
+        if not prim.HasAPI("OmniPhysicsSurfaceDeformableSimAPI"):
+            continue
+        path = str(prim.GetPath())
+        pts = _fabric_points(path)
+        if pts is None:
+            a = prim.GetAttribute("points")
+            pts = np.array(a.Get(), dtype=np.float64) if a and a.Get() is not None else None
+        if pts is None or not len(pts):
+            continue
+
+        rest = pts.copy()
+        other = [i for i in range(3) if i != axis]
+        # bin along the long axis; each ring of vertices shrinks about its own
+        # centre rather than about the duct's overall centroid
+        order = np.argsort(pts[:, axis])
+        span = float(pts[:, axis].max() - pts[:, axis].min())
+        nbins = max(1, int(round(span / 0.01)))
+        edges = np.linspace(pts[:, axis].min() - 1e-6,
+                            pts[:, axis].max() + 1e-6, nbins + 1)
+        idx = np.clip(np.digitize(pts[:, axis], edges) - 1, 0, nbins - 1)
+        for b in range(nbins):
+            sel = np.where(idx == b)[0]
+            if len(sel) < 3:
+                continue
+            c = pts[sel][:, other].mean(axis=0)
+            rest[np.ix_(sel, other)] = c + (pts[sel][:, other] - c) * factor
+
+        tri_attr = prim.GetAttribute("omniphysics:restTriVtxIndices")
+        if not tri_attr or tri_attr.Get() is None:
+            continue
+        prim.GetAttribute("omniphysics:restShapePoints").Set(
+            Vt.Vec3fArray.FromNumpy(rest.astype(np.float32)))
+
+        tris = np.array(tri_attr.Get(), dtype=np.int64)
+        pairs = _adjacent_triangle_pairs(tris)
+        if pairs:
+            angles = _dihedral_angles(rest, tris, pairs)
+            ap = prim.GetAttribute("omniphysics:restAdjTriPairs")
+            if not ap or not ap.IsValid():
+                ap = prim.CreateAttribute("omniphysics:restAdjTriPairs",
+                                          Sdf.ValueTypeNames.Int2Array)
+            ap.Set(Vt.Vec2iArray([(int(a), int(b)) for a, b, _, _ in pairs]))
+            ba = prim.GetAttribute("omniphysics:restBendAngles")
+            if not ba or not ba.IsValid():
+                ba = prim.CreateAttribute("omniphysics:restBendAngles",
+                                          Sdf.ValueTypeNames.FloatArray)
+            ba.Set(Vt.FloatArray(angles.tolist()))
+        n_done += 1
+        if verbose:
+            print(f"[taut] {path}: rest cross-section x{factor:.2f} "
+                  f"({len(pts)} pts, {nbins} rings)", flush=True)
+
+    if verbose:
+        print(f"[taut] rest shape narrowed on {n_done} sleeve(s)", flush=True)
+    return n_done
