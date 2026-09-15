@@ -40,8 +40,9 @@ CASES = [
 ]
 
 print()
-print(f"{'case':14s}{'shapes/hoop':>13s}{'seams':>8s}{'seams/hoop':>12s}")
-print("-" * 47)
+print(f"{'case':14s}{'shapes/hoop':>13s}{'children':>8s}{'per hoop':>12s}"
+      f"{'BOUND PTS':>12s}{'per hoop':>12s}")
+print("-" * 71)
 import dataclasses
 for name, solid, clearance, nseg in CASES:
     ctx = omni.usd.get_context()
@@ -65,8 +66,18 @@ for name, solid, clearance, nseg in CASES:
             origin=(0.0, 0.0, 0.30), n_circ=args.n_circ, clearance=clearance,
             rib_visual=True, solid_hoop=solid, verbose=False)
         shp = 1 if solid else nseg
+        # n_seams counts CHILD PRIMS of the seam scope. Each child holds a
+        # localPositionsSrc1 array, so one child can bind hundreds of vertices.
+        # Counting children therefore says nothing about grip on its own --
+        # count the actual attached points.
+        pts_bound = 0
+        for prim in stage.Traverse():
+            a = prim.GetAttribute("omniphysics:localPositionsSrc1")
+            if a and a.Get() is not None:
+                pts_bound += len(a.Get())
         print(f"{name:14s}{shp:13d}{n_seams:8d}"
-              f"{n_seams/max(len(rings),1):12.1f}", flush=True)
+              f"{n_seams/max(len(rings),1):12.1f}"
+              f"{pts_bound:12d}{pts_bound/max(len(rings),1):12.1f}", flush=True)
     except Exception as exc:
         print(f"{name:14s}   FAILED {exc}", flush=True)
 print()

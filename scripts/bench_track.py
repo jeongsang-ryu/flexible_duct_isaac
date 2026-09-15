@@ -21,6 +21,8 @@ ap.add_argument("--layout", required=True)
 ap.add_argument("--n-circ", type=int, default=40)
 ap.add_argument("--ring-segments", type=int, default=16)
 ap.add_argument("--rib-visual", type=int, default=1)
+ap.add_argument("--static", action="store_true",
+                help="frozen swept tube + capsule colliders, no bodies -- what a track becomes after freeze, and the only variant that could carry thousands of parallel cars")
 ap.add_argument("--solid-hoop", action="store_true",
                 help="one convex disc per hoop instead of n capsules")
 ap.add_argument("--no-fabric", action="store_true",
@@ -92,7 +94,16 @@ spacing = doc.get("duct", {}).get("hoop_spacing", 0.05)
 
 t0 = time.perf_counter()
 n_hoops = 0
-if args.no_fabric:
+if args.static:
+    from duct_sim.builder import spawn_duct_static
+    n_col = 0
+    for i, run in enumerate(doc["runs"]):
+        stations = resample(run["points"], spacing)
+        _, _, _, c = spawn_duct_static(stage, i, stations, spec, n_circ=args.n_circ)
+        n_col += c
+        n_hoops += len(stations)
+    print(f"[bench] static: {n_col} capsule colliders, 0 rigid bodies", flush=True)
+elif args.no_fabric:
     # hoops alone, placed exactly where the full build would put them
     from duct_sim.geometry import create_ring
     R = spec.diameter * 0.5
@@ -154,6 +165,7 @@ both_ms = (time.perf_counter() - t) / args.measure * 1e3
 info = dict(tag=args.tag, hoops=n_hoops, n_circ=args.n_circ,
             ring_segments=args.ring_segments, rib_visual=bool(args.rib_visual),
             no_fabric=args.no_fabric, solid_hoop=args.solid_hoop,
+            static=args.static,
             meshes=meshes, tris=tris,
             build_s=round(build_s, 1), phys_ms=round(phys_ms, 2),
             both_ms=round(both_ms, 2), render_ms=round(both_ms - phys_ms, 2),
