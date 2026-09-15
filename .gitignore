@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+layouts/*.usd
+layouts/*.usda
+*.mp4
+*.png
+*.log

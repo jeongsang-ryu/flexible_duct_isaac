@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RoboRacer Duct Planner</title>
+<style>
+/* Local file, no network: system fonts only, so it works offline. */
+:root{
+  --paper:#f2f3ef; --panel:#e7e9e2; --ink:#1b1d21; --ink-soft:#5c6169;
+  --rule:#cdd2c8; --grid-minor:#dde1d8; --grid-major:#c2c8bb;
+  --duct:#e3b505; --duct-edge:#8a6d04; --hoop:#1b1d21; --measure:#2b7a8c;
+  --anchor:#b3402b; --warn:#c2612c; --ok:#3f8f5a; --field:#fbfbf9;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --paper:#15181c; --panel:#1d2126; --ink:#e8eae4; --ink-soft:#9aa2a9;
+    --rule:#2e343b; --grid-minor:#22272d; --grid-major:#333a42;
+    --duct:#f0c419; --duct-edge:#8a6d04; --hoop:#0c0e11; --measure:#59b6c9;
+    --anchor:#e2664c; --warn:#e08a4e; --ok:#63b183; --field:#111418;
+  }
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0; background:var(--paper); color:var(--ink); overflow:hidden;
+  font:15px/1.45 "Barlow Semi Condensed","Avenir Next Condensed",
+       "Helvetica Neue",Arial,sans-serif;
+}
+.app{display:grid; grid-template-columns:276px 1fr; height:100%}
+.rail{background:var(--panel); border-right:1px solid var(--rule); overflow:auto}
+.brand{padding:15px 18px 11px; border-bottom:1px solid var(--rule)}
+.brand h1{margin:0; font-size:19px; font-weight:600}
+.brand p{margin:3px 0 0; font-size:13px; color:var(--ink-soft)}
+.grp{padding:13px 18px; border-bottom:1px solid var(--rule);
+     display:flex; flex-direction:column; gap:9px}
+.grp h2{margin:0; font-size:11px; font-weight:700; letter-spacing:.11em;
+        text-transform:uppercase; color:var(--ink-soft)}
+.row{display:flex; align-items:center; gap:8px}
+.row label{flex:1; font-size:14px}
+input[type=number]{width:76px; padding:5px 7px; background:var(--field);
+  color:var(--ink); border:1px solid var(--rule); border-radius:3px;
+  font:13px ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  font-variant-numeric:tabular-nums}
+input[type=checkbox]{accent-color:var(--measure); width:15px; height:15px}
+button{font:inherit; font-size:14px; padding:7px 10px; cursor:pointer;
+  background:var(--field); color:var(--ink); border:1px solid var(--rule);
+  border-radius:3px}
+button:hover{border-color:var(--ink-soft)}
+button:focus-visible,input:focus-visible{outline:2px solid var(--measure); outline-offset:1px}
+button.primary{background:var(--duct); border-color:var(--duct-edge);
+  color:#1b1d21; font-weight:600}
+button.danger:hover{border-color:var(--warn); color:var(--warn)}
+.btns{display:grid; grid-template-columns:1fr 1fr; gap:8px}
+.btns .wide{grid-column:1/-1}
+.runs{display:flex; flex-direction:column; gap:3px; max-height:172px; overflow:auto}
+.item{display:flex; align-items:center; gap:8px; padding:5px 8px; cursor:pointer;
+  border:1px solid transparent; border-radius:3px;
+  font:12px ui-monospace,Menlo,monospace; font-variant-numeric:tabular-nums}
+.item:hover{background:var(--field)}
+.item.active{border-color:var(--duct-edge); background:var(--field)}
+.item .sw{width:10px;height:10px;border-radius:2px;background:var(--duct);flex:none}
+.item .nm{flex:1; font-family:inherit; font-size:13px;
+  font-family:"Barlow Semi Condensed",Arial,sans-serif}
+.item .an{color:var(--anchor)}
+.stage{position:relative; overflow:hidden}
+canvas{display:block; width:100%; height:100%; touch-action:none; cursor:crosshair}
+.status{position:absolute; left:0; right:0; bottom:0; display:flex; flex-wrap:wrap;
+  background:var(--panel); border-top:1px solid var(--rule);
+  font:12.5px ui-monospace,Menlo,monospace; font-variant-numeric:tabular-nums}
+.stat{padding:7px 14px; border-right:1px solid var(--rule); white-space:nowrap}
+.stat b{font-weight:500; color:var(--ink-soft); margin-right:7px}
+.stat.grow{flex:1; border-right:0; color:var(--ink-soft);
+  font-family:"Barlow Semi Condensed",Arial,sans-serif; font-size:13px}
+.hint{position:absolute; top:12px; left:12px; max-width:340px; background:var(--panel);
+  border:1px solid var(--rule); border-radius:4px; padding:9px 12px;
+  font-size:13.5px; color:var(--ink-soft)}
+.hint b{color:var(--ink)}
+textarea{width:100%; height:96px; resize:vertical; background:var(--field);
+  color:var(--ink); border:1px solid var(--rule); border-radius:3px; padding:7px;
+  font:11.5px/1.4 ui-monospace,Menlo,monospace}
+.note{font-size:12.5px; color:var(--ink-soft); margin:0}
+code{font:11.5px ui-monospace,Menlo,monospace; background:var(--field);
+  padding:1px 4px; border-radius:2px; border:1px solid var(--rule)}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="rail">
+    <div class="brand">
+      <h1>RoboRacer Duct Planner</h1>
+      <p>Place fixed-length ducts, then drag them into the track.</p>
+    </div>
+
+    <div class="grp">
+      <h2>Arena</h2>
+      <div class="row"><label for="ax">Width — m</label><input id="ax" type="number" value="30" min="2" max="200" step="1"></div>
+      <div class="row"><label for="ay">Depth — m</label><input id="ay" type="number" value="20" min="2" max="200" step="1"></div>
+    </div>
+
+    <div class="grp">
+      <h2>Spawn a duct</h2>
+      <div class="row"><label for="len">Length — m</label><input id="len" type="number" value="6" min="0.5" max="60" step="0.5"></div>
+      <div class="row"><label for="node">Node spacing — m</label><input id="node" type="number" value="0.5" min="0.1" max="2" step="0.1"></div>
+      <button id="spawn" class="primary">Spawn duct</button>
+      <p class="note">Length is fixed once spawned — dragging moves it, never stretches it.</p>
+    </div>
+
+    <div class="grp">
+      <h2>Duct spec</h2>
+      <div class="row"><label for="dia">Diameter — m</label><input id="dia" type="number" value="0.40" min="0.05" max="2" step="0.05"></div>
+      <div class="row"><label for="sp">Hoop spacing — m</label><input id="sp" type="number" value="0.05" min="0.01" max="0.5" step="0.01"></div>
+      <div class="row"><label for="snap">Snap to 0.25 m</label><input id="snap" type="checkbox"></div>
+    </div>
+
+    <div class="grp">
+      <h2>Ducts</h2>
+      <div class="runs" id="runs"></div>
+      <div class="btns">
+        <button id="clearAnchors">Clear anchors</button>
+        <button id="delRun" class="danger">Delete duct</button>
+        <button id="undo" class="wide">Undo</button>
+      </div>
+    </div>
+
+    <div class="grp">
+      <h2>Export</h2>
+      <p class="note">Save as <code>track.json</code>, then<br><code>--layout track.json</code></p>
+      <textarea id="json" spellcheck="false" aria-label="Layout JSON"></textarea>
+      <div class="btns">
+        <button id="save">Save file</button>
+        <button id="copy">Copy</button>
+        <button id="load" class="wide">Load pasted JSON</button>
+      </div>
+    </div>
+  </aside>
+
+  <main class="stage">
+    <canvas id="cv"></canvas>
+    <div class="hint">
+      <b>Drag</b> anywhere on a duct — the rest follows like a worm, keeping its
+      length. <b>Shift-click</b> a node to anchor it; anchored nodes stay put
+      while the body moves around them.
+    </div>
+    <div class="status">
+      <div class="stat"><b>CURSOR</b><span id="sCur">—</span></div>
+      <div class="stat"><b>DUCT</b><span id="sRun">—</span></div>
+      <div class="stat"><b>TOTAL</b><span id="sTot">—</span></div>
+      <div class="stat"><b>HOOPS</b><span id="sHoop">—</span></div>
+      <div class="stat grow" id="sNote">&nbsp;</div>
+    </div>
+  </main>
+</div>
+
+<script>
+(function(){
+"use strict";
+const cv=document.getElementById("cv"), ctx=cv.getContext("2d");
+const $=id=>document.getElementById(id);
+
+const S={
+  arena:{w:30,d:20},
+  duct:{dia:0.40, spacing:0.05},
+  snap:false,
+  runs:[], active:-1,
+  hover:null, drag:null, cursor:null,
+  hist:[]
+};
+
+function snap(){ S.hist.push(JSON.stringify(S.runs)); if(S.hist.length>60) S.hist.shift(); }
+const snapM=v=>S.snap?Math.round(v*4)/4:Math.round(v*1000)/1000;
+
+// ---- model -------------------------------------------------------------
+// A duct is a chain of nodes a FIXED distance apart. That is what makes the
+// length a real constraint rather than a number in a box: dragging can only
+// reposition the chain, never lengthen it.
+function makeDuct(lengthM, nodeSpacing, cx, cy){
+  const n = Math.max(2, Math.round(lengthM/nodeSpacing)+1);
+  const seg = lengthM/(n-1);
+  const pts = [];
+  for(let i=0;i<n;i++) pts.push([cx - lengthM/2 + seg*i, cy]);
+  return {name:"duct "+(S.runs.length+1), seg, pts, anchors:[]};
+}
+const isAnchor=(r,i)=>r.anchors.indexOf(i)>=0;
+
+function chainLength(r){ return r.seg*(r.pts.length-1); }
+
+// Jakobsen relaxation: repeatedly pull each pair back to the rest length.
+// Held nodes (the one under the cursor, plus any anchors) do not move, so the
+// rest of the body flows around them -- the worm behaviour.
+function relax(r, held){
+  const L=r.seg, pts=r.pts;
+  const fixed=i => i===held || isAnchor(r,i);
+  for(let it=0; it<40; it++){
+    for(let i=0;i<pts.length-1;i++){
+      const a=pts[i], b=pts[i+1];
+      let dx=b[0]-a[0], dy=b[1]-a[1];
+      let d=Math.hypot(dx,dy);
+      if(d<1e-9){ dx=1e-6; dy=0; d=1e-6; }
+      const corr=(d-L)/d;
+      const wa=fixed(i)?0:1, wb=fixed(i+1)?0:1;
+      const tot=wa+wb; if(!tot) continue;
+      if(wa){ a[0]+=dx*corr*(wa/tot); a[1]+=dy*corr*(wa/tot); }
+      if(wb){ b[0]-=dx*corr*(wb/tot); b[1]-=dy*corr*(wb/tot); }
+    }
+  }
+}
+
+// ---- view --------------------------------------------------------------
+let V={s:20,ox:0,oy:0};
+function fit(){
+  const w=cv.clientWidth, h=cv.clientHeight-34, pad=44;
+  V.s=Math.max(4, Math.min((w-pad*2)/S.arena.w, (h-pad*2)/S.arena.d));
+  V.ox=w/2; V.oy=h/2;
+}
+const toPx=(x,y)=>[V.ox+x*V.s, V.oy-y*V.s];
+const toM=(px,py)=>[(px-V.ox)/V.s, (V.oy-py)/V.s];
+const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+function draw(){
+  const dpr=Math.min(2,devicePixelRatio||1), w=cv.clientWidth, h=cv.clientHeight;
+  if(cv.width!==Math.round(w*dpr)||cv.height!==Math.round(h*dpr)){
+    cv.width=Math.round(w*dpr); cv.height=Math.round(h*dpr);
+  }
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  const C={minor:css("--grid-minor"),major:css("--grid-major"),ink:css("--ink"),
+    soft:css("--ink-soft"),duct:css("--duct"),edge:css("--duct-edge"),
+    hoop:css("--hoop"),meas:css("--measure"),anc:css("--anchor"),paper:css("--paper")};
+  ctx.fillStyle=C.paper; ctx.fillRect(0,0,w,h);
+  const W=S.arena.w, D=S.arena.d;
+
+  ctx.lineWidth=1;
+  for(let g=-Math.ceil(W/2); g<=Math.ceil(W/2); g++){
+    ctx.strokeStyle=(g%5===0)?C.major:C.minor;
+    const p0=toPx(g,-D/2), p1=toPx(g,D/2);
+    ctx.beginPath(); ctx.moveTo(Math.round(p0[0])+.5,p0[1]);
+    ctx.lineTo(Math.round(p1[0])+.5,p1[1]); ctx.stroke();
+  }
+  for(let g=-Math.ceil(D/2); g<=Math.ceil(D/2); g++){
+    ctx.strokeStyle=(g%5===0)?C.major:C.minor;
+    const p0=toPx(-W/2,g), p1=toPx(W/2,g);
+    ctx.beginPath(); ctx.moveTo(p0[0],Math.round(p0[1])+.5);
+    ctx.lineTo(p1[0],Math.round(p1[1])+.5); ctx.stroke();
+  }
+
+  ctx.strokeStyle=C.meas; ctx.lineWidth=1.5;
+  const b=toPx(-W/2,D/2);
+  ctx.strokeRect(Math.round(b[0])+.5, Math.round(b[1])+.5, W*V.s, D*V.s);
+  ctx.fillStyle=C.meas; ctx.font='500 12px ui-monospace,Menlo,monospace';
+  ctx.textAlign="center";
+  const tp=toPx(0,D/2); ctx.fillText(W.toFixed(0)+" m", tp[0], tp[1]-8);
+  ctx.save(); const lp=toPx(-W/2,0);
+  ctx.translate(lp[0]-10,lp[1]); ctx.rotate(-Math.PI/2);
+  ctx.fillText(D.toFixed(0)+" m",0,0); ctx.restore();
+  ctx.textAlign="left";
+
+  const dpx=Math.max(2, S.duct.dia*V.s);
+  S.runs.forEach((r,ri)=>{
+    const act=ri===S.active, pts=r.pts;
+    ctx.lineJoin=ctx.lineCap="round";
+    ctx.strokeStyle=C.duct; ctx.globalAlpha=act?1:.5; ctx.lineWidth=dpx;
+    ctx.beginPath();
+    pts.forEach((p,i)=>{const q=toPx(p[0],p[1]); i?ctx.lineTo(q[0],q[1]):ctx.moveTo(q[0],q[1]);});
+    ctx.stroke();
+
+    const L=chainLength(r), n=Math.max(2,Math.round(L/S.duct.spacing)+1);
+    if(V.s*S.duct.spacing>2.2 && n<4000){
+      ctx.strokeStyle=C.hoop; ctx.lineWidth=1; ctx.globalAlpha=act?.7:.3;
+      for(let k=0;k<n;k++){
+        const t=k/(n-1)*(pts.length-1);
+        const i=Math.min(pts.length-2, Math.floor(t)), f=t-i;
+        const ax=pts[i][0]+(pts[i+1][0]-pts[i][0])*f;
+        const ay=pts[i][1]+(pts[i+1][1]-pts[i][1])*f;
+        let dx=pts[i+1][0]-pts[i][0], dy=pts[i+1][1]-pts[i][1];
+        const m=Math.hypot(dx,dy)||1;
+        const nx=-dy/m*S.duct.dia/2, ny=dx/m*S.duct.dia/2;
+        const p0=toPx(ax-nx,ay-ny), p1=toPx(ax+nx,ay+ny);
+        ctx.beginPath(); ctx.moveTo(p0[0],p0[1]); ctx.lineTo(p1[0],p1[1]); ctx.stroke();
+      }
+    }
+    ctx.globalAlpha=1;
+
+    ctx.strokeStyle=C.edge; ctx.lineWidth=1; ctx.setLineDash([4,4]);
+    ctx.globalAlpha=act?.55:.22; ctx.beginPath();
+    pts.forEach((p,i)=>{const q=toPx(p[0],p[1]); i?ctx.lineTo(q[0],q[1]):ctx.moveTo(q[0],q[1]);});
+    ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha=1;
+
+    pts.forEach((p,pi)=>{
+      const q=toPx(p[0],p[1]);
+      const hot=S.hover&&S.hover.run===ri&&S.hover.idx===pi;
+      const anc=isAnchor(r,pi);
+      if(anc){
+        ctx.fillStyle=C.anc;
+        ctx.beginPath(); ctx.arc(q[0],q[1],5.5,0,7); ctx.fill();
+        ctx.strokeStyle=C.paper; ctx.lineWidth=1.6; ctx.stroke();
+        ctx.strokeStyle=C.anc; ctx.lineWidth=1.4;
+        ctx.beginPath(); ctx.arc(q[0],q[1],9,0,7); ctx.stroke();
+      }else{
+        ctx.beginPath(); ctx.arc(q[0],q[1],hot?5:3.2,0,7);
+        ctx.fillStyle=hot?C.meas:(act?C.ink:C.soft); ctx.fill();
+        if(hot){ctx.strokeStyle=C.paper; ctx.lineWidth=1.5; ctx.stroke();}
+      }
+    });
+  });
+
+  if(S.cursor){
+    const q=toPx(S.cursor[0],S.cursor[1]);
+    ctx.strokeStyle=C.meas; ctx.globalAlpha=.35; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(q[0]-9,q[1]); ctx.lineTo(q[0]+9,q[1]);
+    ctx.moveTo(q[0],q[1]-9); ctx.lineTo(q[0],q[1]+9); ctx.stroke();
+    ctx.globalAlpha=1;
+  }
+}
+
+function pick(mx,my){
+  let best=null, bd=14;
+  S.runs.forEach((r,ri)=>r.pts.forEach((p,pi)=>{
+    const q=toPx(p[0],p[1]); const d=Math.hypot(q[0]-mx,q[1]-my);
+    if(d<bd){bd=d; best={run:ri,idx:pi};}
+  }));
+  return best;
+}
+
+cv.addEventListener("pointerdown",e=>{
+  cv.setPointerCapture(e.pointerId);
+  const rc=cv.getBoundingClientRect(), mx=e.clientX-rc.left, my=e.clientY-rc.top;
+  const hit=pick(mx,my);
+  if(!hit) return;
+  S.active=hit.run;
+  if(e.shiftKey){
+    snap();
+    const r=S.runs[hit.run], k=r.anchors.indexOf(hit.idx);
+    if(k>=0) r.anchors.splice(k,1); else r.anchors.push(hit.idx);
+    refresh(); return;
+  }
+  snap(); S.drag=hit; refresh();
+});
+
+cv.addEventListener("pointermove",e=>{
+  const rc=cv.getBoundingClientRect(), mx=e.clientX-rc.left, my=e.clientY-rc.top;
+  const m=toM(mx,my); S.cursor=m;
+  if(S.drag){
+    const r=S.runs[S.drag.run];
+    r.pts[S.drag.idx][0]=snapM(m[0]);
+    r.pts[S.drag.idx][1]=snapM(m[1]);
+    relax(r, S.drag.idx);
+    draw(); stats(); writeJSON(); return;
+  }
+  const h=pick(mx,my); S.hover=h;
+  cv.style.cursor=h?"grab":"crosshair";
+  draw(); stats();
+});
+
+function up(){ S.drag=null; refresh(); }
+cv.addEventListener("pointerup",up);
+cv.addEventListener("pointercancel",up);
+cv.addEventListener("pointerleave",()=>{S.cursor=null; draw();});
+
+addEventListener("keydown",e=>{
+  if(/INPUT|TEXTAREA/.test(e.target.tagName)) return;
+  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="z"){e.preventDefault(); undo();}
+});
+function undo(){
+  const p=S.hist.pop(); if(!p) return;
+  S.runs=JSON.parse(p);
+  if(S.active>=S.runs.length) S.active=S.runs.length-1;
+  refresh();
+}
+
+function renderList(){
+  const box=$("runs"); box.innerHTML="";
+  if(!S.runs.length){
+    const d=document.createElement("div"); d.className="note";
+    d.textContent="Nothing yet — set a length and press Spawn duct.";
+    box.appendChild(d); return;
+  }
+  S.runs.forEach((r,i)=>{
+    const el=document.createElement("div");
+    el.className="item"+(i===S.active?" active":"");
+    el.innerHTML='<span class="sw"></span><span class="nm"></span>'
+      +'<span class="an">'+(r.anchors.length?("⚓"+r.anchors.length):"")+'</span>'
+      +'<span>'+chainLength(r).toFixed(2)+' m</span>';
+    el.querySelector(".nm").textContent=r.name;
+    el.onclick=()=>{S.active=i; refresh();};
+    box.appendChild(el);
+  });
+}
+
+function stats(){
+  $("sCur").textContent=S.cursor?(S.cursor[0].toFixed(2)+", "+S.cursor[1].toFixed(2)):"—";
+  const r=S.runs[S.active];
+  $("sRun").textContent=r?(chainLength(r).toFixed(2)+" m / "+r.pts.length+" nodes / "+r.anchors.length+" anchored"):"—";
+  let tot=0,hoops=0;
+  S.runs.forEach(x=>{const L=chainLength(x); tot+=L; hoops+=Math.max(2,Math.round(L/S.duct.spacing)+1);});
+  $("sTot").textContent=tot.toFixed(2)+" m";
+  $("sHoop").textContent=hoops.toLocaleString();
+  const n=$("sNote");
+  if(hoops>3000){ n.textContent=hoops.toLocaleString()+" hoops is a big scene — check step time before committing."; n.style.color="var(--warn)"; }
+  else { n.textContent=S.duct.spacing.toFixed(2)+" m spacing · "+S.duct.dia.toFixed(2)+" m diameter"; n.style.color="var(--ink-soft)"; }
+}
+
+function payload(){
+  return {units:"m", arena:{width:S.arena.w, depth:S.arena.d},
+    duct:{diameter:S.duct.dia, hoop_spacing:S.duct.spacing},
+    runs:S.runs.map(r=>({name:r.name, anchors:r.anchors.slice(),
+      points:r.pts.map(p=>[+p[0].toFixed(3),+p[1].toFixed(3)])}))};
+}
+function writeJSON(){ $("json").value=JSON.stringify(payload(),null,1); }
+
+function refresh(){ fit(); draw(); renderList(); stats(); writeJSON(); }
+
+$("spawn").onclick=()=>{
+  snap();
+  const L=Math.max(.5,+$("len").value||6), ns=Math.max(.1,+$("node").value||.5);
+  // stagger spawns so a new duct does not land on top of the last one
+  const off=(S.runs.length%6)*0.9 - 2.2;
+  S.runs.push(makeDuct(L,ns,0,off));
+  S.active=S.runs.length-1;
+  refresh();
+};
+$("delRun").onclick=()=>{ if(!S.runs.length) return; snap();
+  S.runs.splice(S.active,1); S.active=Math.min(S.active,S.runs.length-1); refresh(); };
+$("clearAnchors").onclick=()=>{ const r=S.runs[S.active]; if(!r) return;
+  snap(); r.anchors=[]; refresh(); };
+$("undo").onclick=undo;
+
+$("save").onclick=()=>{
+  const blob=new Blob([JSON.stringify(payload(),null,1)],{type:"application/json"});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob); a.download="track.json";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+  $("sNote").textContent="Saved track.json to your downloads."; $("sNote").style.color="var(--ok)";
+};
+$("copy").onclick=async()=>{
+  try{ await navigator.clipboard.writeText($("json").value); }
+  catch(_){ $("json").select(); document.execCommand&&document.execCommand("copy"); }
+  const b=$("copy"), t=b.textContent; b.textContent="Copied";
+  setTimeout(()=>b.textContent=t,1200);
+};
+$("load").onclick=()=>{
+  try{
+    const o=JSON.parse($("json").value);
+    if(!o.runs) throw new Error("no runs list");
+    snap();
+    if(o.arena){S.arena.w=+o.arena.width||S.arena.w; S.arena.d=+o.arena.depth||S.arena.d;
+      $("ax").value=S.arena.w; $("ay").value=S.arena.d;}
+    if(o.duct){S.duct.dia=+o.duct.diameter||S.duct.dia; S.duct.spacing=+o.duct.hoop_spacing||S.duct.spacing;
+      $("dia").value=S.duct.dia; $("sp").value=S.duct.spacing;}
+    S.runs=o.runs.map((r,i)=>{
+      const pts=(r.points||[]).map(p=>[+p[0],+p[1]]);
+      let seg=0.5;
+      if(pts.length>1) seg=Math.hypot(pts[1][0]-pts[0][0],pts[1][1]-pts[0][1])||0.5;
+      return {name:r.name||("duct "+(i+1)), seg, pts, anchors:(r.anchors||[]).slice()};
+    });
+    S.active=S.runs.length-1;
+    refresh();
+    $("sNote").textContent="Loaded "+S.runs.length+" duct(s)."; $("sNote").style.color="var(--ok)";
+  }catch(err){
+    $("sNote").textContent="That JSON did not parse — "+err.message; $("sNote").style.color="var(--warn)";
+  }
+};
+
+$("ax").oninput=e=>{S.arena.w=Math.max(2,+e.target.value||30); refresh();};
+$("ay").oninput=e=>{S.arena.d=Math.max(2,+e.target.value||20); refresh();};
+$("dia").oninput=e=>{S.duct.dia=Math.max(.05,+e.target.value||.4); refresh();};
+$("sp").oninput=e=>{S.duct.spacing=Math.max(.01,+e.target.value||.05); refresh();};
+$("snap").onchange=e=>{S.snap=e.target.checked;};
+addEventListener("resize",refresh);
+
+// open with one duct on the floor so the tool shows what it does
+S.runs.push(makeDuct(6,0.5,0,0)); S.active=0;
+refresh();
+})();
+</script>
+</body>
+</html>
