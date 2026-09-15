@@ -40,19 +40,27 @@ from isaacsim.core.api import SimulationContext  # noqa: E402
 spec = DuctSpec()
 n = max(2, int(round(args.length / args.spacing)) + 1)
 
+# Two things are wanted at once and they pull opposite ways:
+#   quiet  -- it must not heave around on its own
+#   supple -- a hand must be able to fold the end down to the floor
+# Stiffness resists gravity and the hand EQUALLY, so buying quiet with
+# stiffness buys stubbornness too. Damping resists only speed, so it can
+# settle the chain without fighting a slow, deliberate bend. Hence a sweep
+# along low stiffness x high damping, including zero stiffness -- no spring
+# back at all, which is also the "stays where I bent it" the duct wants.
 CASES = [
     # mass_per_m, stiffness, damping, body_damping, bend_limit
-    (0.5,   8.0,  2.0, 0.5, 14.0),
-    (0.5,  50.0, 10.0, 0.5, 14.0),
-    (0.5,  50.0, 10.0, 2.0, 10.0),
-    (0.5, 200.0, 20.0, 1.0, 10.0),
-    (0.5, 200.0, 40.0, 2.0,  8.0),
-    (0.5, 600.0, 60.0, 2.0,  8.0),
+    (0.5, 200.0, 20.0, 1.0, 10.0),   # current default: quiet but stiff
+    (0.5,  30.0, 30.0, 2.0, 14.0),
+    (0.5,  10.0, 30.0, 2.0, 14.0),
+    (0.5,  10.0, 60.0, 4.0, 14.0),
+    (0.5,   0.0, 30.0, 3.0, 14.0),   # no spring: holds the shape it is given
+    (0.5,   0.0, 60.0, 5.0, 18.0),
 ]
 
-print(f"\n{'mass':>5} {'stiff':>7} {'damp':>6} {'body':>5} {'limit':>6} "
-      f"{'residual m/s':>13} {'sag m':>7}", flush=True)
-print("-" * 60, flush=True)
+print(f"\n{'stiff':>7} {'damp':>6} {'body':>5} {'limit':>6} "
+      f"{'residual':>10} {'waviness':>9} {'bend m':>8}", flush=True)
+print("-" * 58, flush=True)
 
 for ci, (mpm, stiff, damp, bdamp, limit) in enumerate(CASES):
     ctx = omni.usd.get_context()
@@ -101,12 +109,29 @@ for ci, (mpm, stiff, damp, bdamp, limit) in enumerate(CASES):
         p = np.asarray(p.cpu() if hasattr(p, "cpu") else p)
         zs.append(float(p[:, 2].max() - p[:, 2].min()))
 
-    print(f"{mpm:5.2f} {stiff:7.1f} {damp:6.1f} {bdamp:5.1f} {limit:6.1f} "
-          f"{np.mean(speeds):13.5f} {np.mean(zs):7.4f}", flush=True)
+    # --- now: can a hand fold the end down? push the last body downward and
+    # --- see how far the tip actually travels
+    from duct_sim.mouse_drag import _to_backend  # noqa: E402
+    tip = len(paths) - 1
+    p0, _ = view.get_world_poses()
+    p0 = np.asarray(p0.cpu() if hasattr(p0, "cpu") else p0)
+    z_before = float(p0[tip, 2])
+    f = np.zeros((len(paths), 3), dtype=np.float32)
+    for j in range(max(0, tip - 6), tip + 1):
+        f[j, 2] = -3.0                     # 3 N down, ~25x a body's weight
+    for _ in range(600):
+        view.apply_forces(_to_backend(f), is_global=True)
+        sim.step(render=False)
+    p1, _ = view.get_world_poses()
+    p1 = np.asarray(p1.cpu() if hasattr(p1, "cpu") else p1)
+    bend = z_before - float(p1[tip, 2])
+
+    print(f"{stiff:7.1f} {damp:6.1f} {bdamp:5.1f} {limit:6.1f} "
+          f"{np.mean(speeds):10.5f} {np.mean(zs):9.4f} {bend:8.4f}", flush=True)
 
     sim.stop()
     sim.clear_instance()
 
-print("\nlower residual = settles instead of heaving. sag is the z spread,\n"
-      "i.e. how far the duct droops; too stiff shows up as ~0.", flush=True)
+print("\nresidual/waviness: lower = quieter.  bend: how far 3 N folded the tip\n"
+      "down -- higher = more supple. Want both: quiet AND bendable.", flush=True)
 app.close()

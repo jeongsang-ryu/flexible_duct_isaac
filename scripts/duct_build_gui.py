@@ -50,15 +50,15 @@ ap.add_argument("--rigid", action="store_true",
                 help="build the duct from black discs and yellow sleeves hinged "
                      "by compliant joints, with no cloth at all. ~16x fewer "
                      "collision shapes; cannot crumple or drape.")
-ap.add_argument("--bend-limit", type=float, default=10.0,
+ap.add_argument("--bend-limit", type=float, default=14.0,
                 help="--rigid: bend allowed per joint [deg]")
-ap.add_argument("--stiffness", type=float, default=200.0,
+ap.add_argument("--stiffness", type=float, default=30.0,
                 help="--rigid: joint drive stiffness (the compliance)")
-ap.add_argument("--damping", type=float, default=20.0)
+ap.add_argument("--damping", type=float, default=30.0)
 ap.add_argument("--mass-per-m", type=float, default=0.5,
                 help="--rigid: duct mass per metre [kg]. A real 400 mm flexible "
                      "duct is ~0.5; setting a density instead made it 23 kg/m.")
-ap.add_argument("--body-damping", type=float, default=1.0,
+ap.add_argument("--body-damping", type=float, default=2.0,
                 help="--rigid: linear/angular damping on each body; raise it if "
                      "the chain shivers instead of settling")
 ap.add_argument("--solver-iters", type=int, default=32,

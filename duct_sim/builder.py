@@ -752,16 +752,21 @@ def spawn_duct_rigid(
     z: float = 0.0,
     disc_thickness: float = 0.006,
     sleeve_inset: float = 0.006,
-    # measured, not guessed: a sweep over (stiffness, damping, body damping,
-    # bend limit) scored residual body speed after settling. These gave
-    # 0.0034 m/s against 0.0457 for the first guess -- 13x less heaving -- and
-    # left the duct lying flat (0.001 m of vertical waviness against 0.060).
-    bend_limit_deg: float = 10.0,
-    stiffness: float = 200.0,
-    damping: float = 20.0,
+    # Measured, not guessed. Two things are wanted and they pull opposite ways:
+    # the duct must not heave around on its own, and a hand must be able to
+    # fold its end to the floor. STIFFNESS RESISTS BOTH -- gravity and the hand
+    # equally -- so buying quiet with stiffness buys stubbornness with it: at
+    # stiffness 200 the residual was a lovely 0.0034 m/s and 3 N moved the tip
+    # exactly 0.0000 m. DAMPING resists only speed, so it settles the chain
+    # without fighting a slow deliberate bend. Hence low stiffness, high
+    # damping: 0.0088 m/s residual (still 5x quieter than the first guess) and
+    # the tip folds 70 mm.
+    bend_limit_deg: float = 14.0,
+    stiffness: float = 30.0,
+    damping: float = 30.0,
     density: float = 0.0,
     mass_per_m: float = 0.5,
-    body_damping: float = 1.0,
+    body_damping: float = 2.0,
     solver_pos_iters: int = 32,
     solver_vel_iters: int = 4,
     sleep_threshold: float = 0.005,
@@ -869,3 +874,306 @@ def spawn_duct_rigid(
               f"(vs ~{len(stations) * spec.ring_segments} shapes for the cloth "
               f"build)", flush=True)
     return root, [b for b, _ in bodies], len(bodies), n_joints
+
+
+def _tube_mesh(stations, radius, n_circ, z, rib_amp=0.0, rib_period=0.10,
+               arc_step=0.05):
+    """Points and triangles for a tube swept along `stations`.
+
+    rib_amp modulates the radius along the path, so the corrugations of real
+    ducting come out of the geometry instead of needing separate hoop bodies:
+        r(s) = radius + rib_amp * sin(2*pi*s / rib_period)
+    """
+    pts, tris = [], []
+    s = 0.0
+    for i, (cx, cy, h) in enumerate(stations):
+        if i:
+            s += math.hypot(cx - stations[i - 1][0], cy - stations[i - 1][1])
+        r = radius + (rib_amp * math.sin(2 * math.pi * s / rib_period)
+                      if rib_amp else 0.0)
+        th = math.radians(h)
+        ux, uy = math.cos(th), math.sin(th)
+        for k in range(n_circ):
+            a = 2 * math.pi * k / n_circ
+            rx, ry = -uy * r * math.cos(a), ux * r * math.cos(a)
+            pts.append([cx + rx, cy + ry, z + r * math.sin(a)])
+    for j in range(len(stations) - 1):
+        for k in range(n_circ):
+            k2 = (k + 1) % n_circ
+            a, b = j * n_circ + k, j * n_circ + k2
+            c, d = (j + 1) * n_circ + k2, (j + 1) * n_circ + k
+            tris += [[a, b, c], [a, c, d]]
+    return pts, tris
+
+
+def spawn_duct_static(
+    stage,
+    index: int,
+    stations,
+    spec,
+    z: float = 0.0,
+    n_circ: int = 20,
+    rib_amp: float = 0.012,
+    rib_period: float = 0.10,
+    capsule_collider: bool = True,
+    capsule_every: float = 0.25,
+    colour=(0.95, 0.80, 0.10),
+    rib_colour=(0.03, 0.03, 0.03),
+    verbose: bool = True,
+):
+    """A duct that does not move: one swept tube mesh, static collider.
+
+    No bodies, no joints, no solver work at all -- the duct is scenery. The
+    corrugations come from modulating the sweep radius, so it still LOOKS like
+    ducting to a camera or an RTX lidar.
+
+    Two collider choices, and the default is deliberate. A triangle mesh is
+    exact but every contact against it is a mesh query; a row of capsules along
+    the centreline is approximate but contacts are analytic, which is both
+    faster and far better behaved for a car hitting it at speed. For a track
+    barrier the capsule row is the better trade.
+    """
+    R = spec.radius
+    root = f"/World/duct_{index:02d}"
+    UsdGeom.Xform.Define(stage, root)
+    if z <= 0.0:
+        z = R + 0.002
+
+    pts, tris = _tube_mesh(stations, R, n_circ, z, rib_amp, rib_period)
+    mesh = UsdGeom.Mesh.Define(stage, f"{root}/tube")
+    mesh.CreatePointsAttr(Vt.Vec3fArray.FromNumpy(np.array(pts, dtype=np.float32)))
+    mesh.CreateFaceVertexCountsAttr(Vt.IntArray([3] * len(tris)))
+    mesh.CreateFaceVertexIndicesAttr(Vt.IntArray(np.array(tris).flatten().tolist()))
+    mesh.CreateDoubleSidedAttr(True)
+    mesh.CreateDisplayColorAttr().Set([Gf.Vec3f(*colour)])
+
+    n_col = 0
+    if capsule_collider:
+        # analytic capsules along the centreline, invisible, no rigid body ->
+        # static colliders
+        total = 0.0
+        for i in range(len(stations) - 1):
+            total += math.hypot(stations[i + 1][0] - stations[i][0],
+                                stations[i + 1][1] - stations[i][1])
+        step = max(1, int(round(capsule_every /
+                                (total / max(1, len(stations) - 1)))))
+        for i in range(0, len(stations) - 1, step):
+            j = min(i + step, len(stations) - 1)
+            x0, y0, _ = stations[i]
+            x1, y1, _ = stations[j]
+            seg = math.hypot(x1 - x0, y1 - y0)
+            if seg < 1e-4:
+                continue
+            cap = UsdGeom.Capsule.Define(stage, f"{root}/col_{i:04d}")
+            cap.CreateAxisAttr("Z")
+            cap.CreateRadiusAttr(float(R))
+            cap.CreateHeightAttr(float(seg))
+            xf = UsdGeom.Xformable(cap)
+            xf.AddTranslateOp().Set(
+                Gf.Vec3d((x0 + x1) * 0.5, (y0 + y1) * 0.5, float(z)))
+            head = math.degrees(math.atan2(y1 - y0, x1 - x0))
+            q = (Gf.Rotation(Gf.Vec3d(0, 0, 1), head)
+                 * Gf.Rotation(Gf.Vec3d(0, 1, 0), 90.0))
+            xf.AddOrientOp().Set(Gf.Quatf(q.GetQuat()))
+            UsdGeom.Imageable(cap).CreateVisibilityAttr().Set("invisible")
+            UsdPhysics.CollisionAPI.Apply(cap.GetPrim())
+            n_col += 1
+    else:
+        UsdPhysics.CollisionAPI.Apply(mesh.GetPrim())
+        mca = UsdPhysics.MeshCollisionAPI.Apply(mesh.GetPrim())
+        mca.CreateApproximationAttr("none")
+        n_col = 1
+
+    if verbose:
+        print(f"[duct {index:02d}] STATIC: 1 tube mesh "
+              f"({len(pts)} verts, {len(tris)} tris), {n_col} static colliders, "
+              f"0 bodies, 0 joints", flush=True)
+    return root, [], 1, n_col
+
+
+class HybridSkin:
+    """A high-res ribbed tube whose points are driven by a rigid chain.
+
+    Physics stays the cheap disc-and-sleeve chain; the visible surface is a
+    separate mesh that is re-swept each step from the chain's poses. Cameras
+    and RTX lidar see corrugated ducting, the solver sees capsules.
+
+    Which one a sensor sees is not a detail to hand-wave: an RTX lidar traces
+    the RENDER scene (omni.sensors.nv.lidar depends on omni.hydra.rtx), while a
+    physics-query lidar traces colliders. Those are different surfaces here --
+    by the rib amplitude -- so the choice of sensor changes the data.
+    """
+
+    def __init__(self, stage, mesh_path, body_paths, n_circ, radius,
+                 rib_amp=0.012, rib_period=0.10, every=2):
+        self.stage = stage
+        self.mesh = UsdGeom.Mesh.Get(stage, mesh_path)
+        self.body_paths = list(body_paths)
+        self.n_circ = n_circ
+        self.radius = radius
+        self.rib_amp = rib_amp
+        self.rib_period = rib_period
+        self.every = max(1, int(every))
+        self._view = None
+        self._n = 0
+
+    def _ensure(self):
+        if self._view is None:
+            from isaacsim.core.prims import RigidPrim
+            self._view = RigidPrim(self.body_paths)
+        return self._view
+
+    def update(self):
+        """Re-sweep the visual tube from where the bodies actually are."""
+        self._n += 1
+        if self._n % self.every:
+            return
+        try:
+            pos, _ = self._ensure().get_world_poses()
+            pos = np.asarray(pos.cpu() if hasattr(pos, "cpu") else pos)
+        except Exception:
+            return
+        if len(pos) < 2:
+            return
+        stations = []
+        s = 0.0
+        for i in range(len(pos)):
+            if i:
+                s += float(np.hypot(pos[i, 0] - pos[i - 1, 0],
+                                    pos[i, 1] - pos[i - 1, 1]))
+            j = min(i + 1, len(pos) - 1)
+            k = max(i - 1, 0)
+            head = math.degrees(math.atan2(pos[j, 1] - pos[k, 1],
+                                           pos[j, 0] - pos[k, 0]))
+            stations.append((float(pos[i, 0]), float(pos[i, 1]), head))
+        pts = []
+        s = 0.0
+        for i, (cx, cy, h) in enumerate(stations):
+            if i:
+                s += math.hypot(cx - stations[i - 1][0], cy - stations[i - 1][1])
+            r = self.radius + self.rib_amp * math.sin(2 * math.pi * s / self.rib_period)
+            th = math.radians(h)
+            ux, uy = math.cos(th), math.sin(th)
+            zc = float(pos[i, 2])
+            for k in range(self.n_circ):
+                a = 2 * math.pi * k / self.n_circ
+                pts.append([cx - uy * r * math.cos(a),
+                            cy + ux * r * math.cos(a),
+                            zc + r * math.sin(a)])
+        self.mesh.GetPointsAttr().Set(
+            Vt.Vec3fArray.FromNumpy(np.array(pts, dtype=np.float32)))
+
+
+def spawn_duct_hybrid(stage, index, stations, spec, n_circ=20,
+                      rib_amp=0.012, rib_period=0.10, skin_every=2,
+                      colour=(0.95, 0.80, 0.10), verbose=True, **rigid_kw):
+    """Rigid chain for physics, separate ribbed tube for the eye."""
+    root, paths, n_bodies, n_joints = spawn_duct_rigid(
+        stage, index, stations, spec, verbose=False, **rigid_kw)
+    # the chain's own boxes become invisible; the swept tube is what is seen
+    for p in paths:
+        prim = stage.GetPrimAtPath(p)
+        if prim and prim.IsValid():
+            UsdGeom.Imageable(prim).CreateVisibilityAttr().Set("invisible")
+
+    z = spec.radius + 0.006 + 0.05
+    pts, tris = _tube_mesh(stations, spec.radius, n_circ, z, rib_amp, rib_period)
+    mp = f"{root}/skin"
+    mesh = UsdGeom.Mesh.Define(stage, mp)
+    mesh.CreatePointsAttr(Vt.Vec3fArray.FromNumpy(np.array(pts, dtype=np.float32)))
+    mesh.CreateFaceVertexCountsAttr(Vt.IntArray([3] * len(tris)))
+    mesh.CreateFaceVertexIndicesAttr(Vt.IntArray(np.array(tris).flatten().tolist()))
+    mesh.CreateDoubleSidedAttr(True)
+    mesh.CreateDisplayColorAttr().Set([Gf.Vec3f(*colour)])
+
+    skin = HybridSkin(stage, mp, paths, n_circ, spec.radius,
+                      rib_amp, rib_period, skin_every)
+    if verbose:
+        print(f"[duct {index:02d}] HYBRID: {n_bodies} bodies / {n_joints} joints "
+              f"for physics, {len(pts)} verts re-swept every {skin_every} steps "
+              f"for the eye", flush=True)
+    return root, paths, skin, n_bodies
+
+
+def spawn_duct_fem(
+    stage,
+    index: int,
+    stations,
+    spec,
+    material_path: str,
+    z: float = 0.0,
+    n_circ: int = 12,
+    wall: float = 0.0,
+    colour=(0.95, 0.80, 0.10),
+    verbose: bool = True,
+):
+    """A solid low-resolution cylinder as a volume (FEM) deformable.
+
+    Deliberately NOT a hollow thin-walled tube. Tetrahedralising a thin wall
+    needs a very dense mesh to get even one element across it, which is both
+    expensive and numerically fragile -- the standard advice, and it matches
+    what a thin shell already cost here. A solid low-res cylinder is the usual
+    compromise: it squashes and springs back when a car hits it, and it cannot
+    represent the hollow interior at all.
+
+    Included so the comparison is honest, not because it is expected to win.
+    """
+    R = spec.radius
+    root = f"/World/duct_{index:02d}"
+    UsdGeom.Xform.Define(stage, root)
+    if z <= 0.0:
+        z = R + 0.02
+
+    r_out = R if wall <= 0 else R
+    pts, tris = _tube_mesh(stations, r_out, n_circ, z)
+    # cap both ends so the sweep is a closed solid: the cooker needs a watertight
+    # surface to tetrahedralise
+    n = len(stations)
+    base = len(pts)
+    first_c = [sum(p[k] for p in pts[:n_circ]) / n_circ for k in range(3)]
+    last_c = [sum(p[k] for p in pts[(n - 1) * n_circ:n * n_circ]) / n_circ
+              for k in range(3)]
+    pts.append(first_c)
+    pts.append(last_c)
+    ci0, ci1 = base, base + 1
+    for k in range(n_circ):
+        k2 = (k + 1) % n_circ
+        tris.append([ci0, k2, k])
+        tris.append([ci1, (n - 1) * n_circ + k, (n - 1) * n_circ + k2])
+
+    skin = f"{root}/solid"
+    m = UsdGeom.Mesh.Define(stage, skin)
+    m.CreatePointsAttr(Vt.Vec3fArray.FromNumpy(np.array(pts, dtype=np.float32)))
+    m.CreateFaceVertexCountsAttr(Vt.IntArray([3] * len(tris)))
+    m.CreateFaceVertexIndicesAttr(Vt.IntArray(np.array(tris).flatten().tolist()))
+    m.CreateDisplayColorAttr().Set([Gf.Vec3f(*colour)])
+
+    ok = deformableUtils.create_auto_volume_deformable_hierarchy(
+        stage,
+        root_prim_path=root,
+        simulation_tetmesh_path=f"{root}/simTet",
+        collision_tetmesh_path=f"{root}/colTet",
+        cooking_src_mesh_path=skin,
+        simulation_hex_mesh_enabled=True,
+        cooking_src_simplification_enabled=True,
+        set_visibility_with_guide_purpose=True,
+    )
+    if not ok:
+        if verbose:
+            print(f"[duct {index:02d}] FEM: hierarchy FAILED", flush=True)
+        return root, [], 0, 0
+
+    # NOT PhysxDeformableBodyAPI -- no such schema in 6.1; the applicable one
+    # is PhysxBaseDeformableBodyAPI, and create_auto_volume_deformable_hierarchy
+    # has already applied whatever the body needs. Only the material is left.
+    rp = stage.GetPrimAtPath(root)
+    for api in ("PhysxBaseDeformableBodyAPI",):
+        try:
+            rp.ApplyAPI(api)
+        except Exception:
+            pass
+    physicsUtils.add_physics_material_to_prim(stage, rp, material_path)
+    if verbose:
+        print(f"[duct {index:02d}] FEM: solid sweep {len(pts)} verts -> "
+              f"tetrahedral body", flush=True)
+    return root, [], 1, 0
