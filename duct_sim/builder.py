@@ -127,6 +127,7 @@ def spawn_duct_single(
     surface_sampling: float = 0.02,
     ring_colour=(0.03, 0.03, 0.03),
     cloth_colour=(0.78, 0.60, 0.05),
+    weave_tile: float = 0.04,       # metres of duct per weave texture tile
     anchor_ends: bool = False,
     verbose: bool = True,
 ):
@@ -171,8 +172,8 @@ def spawn_duct_single(
         prim = stage.GetPrimAtPath(path)
         xf = UsdGeom.Xformable(prim)
         xf.AddTranslateOp().Set(Gf.Vec3d(ox + ux * t, oy + uy * t, oz))
-        q = (Gf.Rotation(Gf.Vec3d(0, 0, 1), heading_deg)
-             * Gf.Rotation(Gf.Vec3d(0, 1, 0), 90.0))
+        q = (Gf.Rotation(Gf.Vec3d(0, 1, 0), 90.0)
+             * Gf.Rotation(Gf.Vec3d(0, 0, 1), heading_deg))
         xf.AddOrientOp().Set(Gf.Quatf(q.GetQuat()))
         for seg in prim.GetChildren():
             UsdGeom.Gprim(seg).CreateDisplayColorAttr().Set([Gf.Vec3f(*ring_colour)])
@@ -208,12 +209,26 @@ def spawn_duct_single(
             a = 2 * math.pi * i / n_circ
             rx, ry = -uy * cloth_r * math.cos(a), ux * cloth_r * math.cos(a)
             pts.append([cx + rx, cy + ry, oz + cloth_r * math.sin(a)])
+    # UVs, face-varying. Vertex-interpolated UVs cannot work on a closed tube:
+    # the seam column is shared between u=~1 and u=0, so one strip of faces
+    # would run the texture backwards across the whole duct. Per-corner UVs let
+    # that column carry both values. u wraps the circumference, v runs the
+    # length, both in metres / WEAVE_TILE_M so the thread size is physical and
+    # does not change when the duct gets longer.
+    circumference = 2.0 * math.pi * cloth_r
+    uvs = []
     for j in range(n_stations - 1):
+        v0 = (span * j / (n_stations - 1)) / weave_tile
+        v1 = (span * (j + 1) / (n_stations - 1)) / weave_tile
         for i in range(n_circ):
             i2 = (i + 1) % n_circ
             a, b = j * n_circ + i, j * n_circ + i2
             c, d = (j + 1) * n_circ + i2, (j + 1) * n_circ + i
             tris += [[a, b, c], [a, c, d]]
+            u0 = (i * circumference / n_circ) / weave_tile
+            u1 = ((i + 1) * circumference / n_circ) / weave_tile
+            uvs += [(u0, v0), (u1, v0), (u1, v1)]
+            uvs += [(u0, v0), (u1, v1), (u0, v1)]
 
     if rib_visual:
         # at the FABRIC's radius, not the hoop's, so the rib sits on the skin
@@ -237,7 +252,11 @@ def spawn_duct_single(
     m.CreateFaceVertexIndicesAttr(Vt.IntArray(np.array(tris).flatten().tolist()))
     m.CreateDoubleSidedAttr(True)
     m.CreateDisplayColorAttr().Set([Gf.Vec3f(*cloth_colour)])
-    bind_look(stage, m, cloth_colour, roughness=_geom.CLOTH_ROUGHNESS, ior=_geom.CLOTH_IOR)
+    UsdGeom.PrimvarsAPI(m).CreatePrimvar(
+        "st", Sdf.ValueTypeNames.TexCoord2fArray,
+        UsdGeom.Tokens.faceVarying).Set(Vt.Vec2fArray([Gf.Vec2f(*uv) for uv in uvs]))
+    bind_look(stage, m, cloth_colour, roughness=_geom.CLOTH_ROUGHNESS,
+              ior=_geom.CLOTH_IOR, weave=True)
     if smooth_render:
         # Render-only smoothing. The solver still sees the coarse triangles;
         # this just stops a 28-sided tube reading as a faceted prism, and takes
@@ -371,8 +390,8 @@ def spawn_duct(
         xf = UsdGeom.Xformable(prim)
         xf.AddTranslateOp().Set(Gf.Vec3d(ox + ux * t, oy + uy * t, oz))
         # hoop plane perpendicular to the duct axis
-        q = (Gf.Rotation(Gf.Vec3d(0, 0, 1), heading_deg)
-             * Gf.Rotation(Gf.Vec3d(0, 1, 0), 90.0))
+        q = (Gf.Rotation(Gf.Vec3d(0, 1, 0), 90.0)
+             * Gf.Rotation(Gf.Vec3d(0, 0, 1), heading_deg))
         xf.AddOrientOp().Set(Gf.Quatf(q.GetQuat()))
         for seg in prim.GetChildren():
             UsdGeom.Gprim(seg).CreateDisplayColorAttr().Set([Gf.Vec3f(*ring_colour)])
@@ -561,6 +580,7 @@ def spawn_duct_path(
     surface_sampling: float = 0.02,
     ring_colour=(0.03, 0.03, 0.03),
     cloth_colour=(0.78, 0.60, 0.05),
+    weave_tile: float = 0.04,       # metres of duct per weave texture tile
     verbose: bool = True,
 ):
     """A duct that FOLLOWS a drawn centreline instead of running straight.
@@ -592,8 +612,8 @@ def spawn_duct_path(
         prim = stage.GetPrimAtPath(path)
         xf = UsdGeom.Xformable(prim)
         xf.AddTranslateOp().Set(Gf.Vec3d(float(x), float(y), float(z)))
-        q = (Gf.Rotation(Gf.Vec3d(0, 0, 1), float(h))
-             * Gf.Rotation(Gf.Vec3d(0, 1, 0), 90.0))
+        q = (Gf.Rotation(Gf.Vec3d(0, 1, 0), 90.0)
+             * Gf.Rotation(Gf.Vec3d(0, 0, 1), float(h)))
         xf.AddOrientOp().Set(Gf.Quatf(q.GetQuat()))
         for seg in prim.GetChildren():
             UsdGeom.Gprim(seg).CreateDisplayColorAttr().Set([Gf.Vec3f(*ring_colour)])
@@ -639,12 +659,27 @@ def spawn_duct_path(
             a = 2 * math.pi * i / n_circ
             rx, ry = -uy * cloth_r * math.cos(a), ux * cloth_r * math.cos(a)
             pts.append([cx + rx, cy + ry, z + cloth_r * math.sin(a)])
+    # Face-varying UVs. Vertex-interpolated UVs cannot work on a closed tube:
+    # the seam column is shared between u=~1 and u=0, so one strip of faces
+    # would run the texture backwards along the whole duct. v accumulates the
+    # real arc length so the weave does not stretch or compress through a turn.
+    circumference = 2.0 * math.pi * cloth_r
+    arc = [0.0]
     for j in range(len(loops) - 1):
+        arc.append(arc[-1] + math.hypot(loops[j + 1][0] - loops[j][0],
+                                        loops[j + 1][1] - loops[j][1]))
+    uvs = []
+    for j in range(len(loops) - 1):
+        v0, v1 = arc[j] / weave_tile, arc[j + 1] / weave_tile
         for i in range(n_circ):
             i2 = (i + 1) % n_circ
             a, b = j * n_circ + i, j * n_circ + i2
             c, d = (j + 1) * n_circ + i2, (j + 1) * n_circ + i
             tris += [[a, b, c], [a, c, d]]
+            u0 = (i * circumference / n_circ) / weave_tile
+            u1 = ((i + 1) * circumference / n_circ) / weave_tile
+            uvs += [(u0, v0), (u1, v0), (u1, v1)]
+            uvs += [(u0, v0), (u1, v1), (u0, v1)]
 
     sroot = f"{root}/skin"
     skin = f"{sroot}/mesh"
@@ -655,7 +690,11 @@ def spawn_duct_path(
     m.CreateFaceVertexIndicesAttr(Vt.IntArray(np.array(tris).flatten().tolist()))
     m.CreateDoubleSidedAttr(True)
     m.CreateDisplayColorAttr().Set([Gf.Vec3f(*cloth_colour)])
-    bind_look(stage, m, cloth_colour, roughness=_geom.CLOTH_ROUGHNESS, ior=_geom.CLOTH_IOR)
+    UsdGeom.PrimvarsAPI(m).CreatePrimvar(
+        "st", Sdf.ValueTypeNames.TexCoord2fArray,
+        UsdGeom.Tokens.faceVarying).Set(Vt.Vec2fArray([Gf.Vec2f(*uv) for uv in uvs]))
+    bind_look(stage, m, cloth_colour, roughness=_geom.CLOTH_ROUGHNESS,
+              ior=_geom.CLOTH_IOR, weave=True)
     if smooth_render:
         m.CreateSubdivisionSchemeAttr().Set("catmullClark")
 
@@ -839,8 +878,8 @@ def spawn_duct_rigid(
     def _place(prim, x, y, heading_deg):
         xf = UsdGeom.Xformable(prim)
         xf.AddTranslateOp().Set(Gf.Vec3d(float(x), float(y), float(z)))
-        q = (Gf.Rotation(Gf.Vec3d(0, 0, 1), float(heading_deg))
-             * Gf.Rotation(Gf.Vec3d(0, 1, 0), 90.0))
+        q = (Gf.Rotation(Gf.Vec3d(0, 1, 0), 90.0)
+             * Gf.Rotation(Gf.Vec3d(0, 0, 1), float(heading_deg)))
         xf.AddOrientOp().Set(Gf.Quatf(q.GetQuat()))
 
     bodies = []          # (path, kind)
@@ -1002,8 +1041,8 @@ def spawn_duct_static(
             xf.AddTranslateOp().Set(
                 Gf.Vec3d((x0 + x1) * 0.5, (y0 + y1) * 0.5, float(z)))
             head = math.degrees(math.atan2(y1 - y0, x1 - x0))
-            q = (Gf.Rotation(Gf.Vec3d(0, 0, 1), head)
-                 * Gf.Rotation(Gf.Vec3d(0, 1, 0), 90.0))
+            q = (Gf.Rotation(Gf.Vec3d(0, 1, 0), 90.0)
+                 * Gf.Rotation(Gf.Vec3d(0, 0, 1), head))
             xf.AddOrientOp().Set(Gf.Quatf(q.GetQuat()))
             UsdGeom.Imageable(cap).CreateVisibilityAttr().Set("invisible")
             UsdPhysics.CollisionAPI.Apply(cap.GetPrim())
@@ -1239,8 +1278,8 @@ def spawn_duct_fem(
             prim = disc.GetPrim()
             xf = UsdGeom.Xformable(prim)
             xf.AddTranslateOp().Set(Gf.Vec3d(float(x), float(y), float(z)))
-            q = (Gf.Rotation(Gf.Vec3d(0, 0, 1), float(h))
-                 * Gf.Rotation(Gf.Vec3d(0, 1, 0), 90.0))
+            q = (Gf.Rotation(Gf.Vec3d(0, 1, 0), 90.0)
+                 * Gf.Rotation(Gf.Vec3d(0, 0, 1), float(h)))
             xf.AddOrientOp().Set(Gf.Quatf(q.GetQuat()))
             UsdGeom.Imageable(prim).CreateVisibilityAttr().Set("invisible")
             UsdPhysics.CollisionAPI.Apply(prim)

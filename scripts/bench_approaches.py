@@ -30,6 +30,9 @@ ap.add_argument("--mode", required=True,
                 choices=["static", "rigid", "hybrid", "cloth", "fem"])
 ap.add_argument("--length", type=float, default=6.0)
 ap.add_argument("--spacing", type=float, default=0.05)
+ap.add_argument("--n-circ", type=int, default=28,
+                help="fabric segments around the tube -- the cloth's resolution, "
+                     "varied independently of hoop count")
 ap.add_argument("--warmup", type=int, default=400)
 ap.add_argument("--measure", type=int, default=600)
 ap.add_argument("--out", default="/tmp/bench")
@@ -110,7 +113,7 @@ if args.mode in ("cloth", "fem"):
             poissons_ratio=0.45, density=120.0)
 
 info = {"mode": args.mode, "length_m": args.length, "spacing_m": args.spacing,
-        "stations": len(stations)}
+        "stations": len(stations), "n_circ": args.n_circ}
 skin = None
 
 t0 = time.perf_counter()
@@ -125,8 +128,8 @@ elif args.mode == "hybrid":
     info.update(bodies=nb, joints=nb - 1, shapes=nb)
 elif args.mode == "cloth":
     _, rings, _, n_bound = B.spawn_duct_path(stage, 0, stations, spec, MAT,
-                                             clearance=-0.004)
-    info.update(bodies=len(rings), joints=0,
+                                             clearance=-0.004, n_circ=args.n_circ)
+    info.update(bodies=len(rings), joints=0, n_circ=args.n_circ,
                 shapes=len(rings) * spec.ring_segments, seam_elements=n_bound)
 else:
     _, _, ok, _ = B.spawn_duct_fem(stage, 0, stations, spec, MAT)

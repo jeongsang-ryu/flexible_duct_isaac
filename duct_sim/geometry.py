@@ -15,6 +15,7 @@ exactly represent the hoop's cross-section, and cost less.
 from __future__ import annotations
 
 import math
+import os
 
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, Vt
 
@@ -173,23 +174,31 @@ RING_ROUGHNESS = 0.55
 CLOTH_IOR = 1.02
 RING_IOR = 1.45
 
+# Path to the weave maps, or "" to bind a plain surface. Colour alone cannot
+# read as cloth: what the eye uses is a weave breaking one highlight into
+# hundreds of small ones, which is surface normal, not albedo.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+WEAVE_DIR = os.path.join(_HERE, "textures")
+USE_WEAVE = True
 
-def matte_look(stage, colour, roughness=0.95, metallic=0.0, ior=1.2):
+
+def matte_look(stage, colour, roughness=0.95, metallic=0.0, ior=1.2, weave=False):
     """Return the path of a shared UsdPreviewSurface for this colour/roughness.
 
     Cached per (stage, colour, roughness): a track has thousands of meshes and
     they must not each author their own material.
     """
     key = (stage, tuple(round(c, 4) for c in colour), round(roughness, 3),
-           round(metallic, 3), round(ior, 3))
+           round(metallic, 3), round(ior, 3), bool(weave))
     hit = _LOOKS.get(key)
     if hit is not None:
         return hit
 
     from pxr import UsdShade
     r, g, b = colour
-    name = "look_%02x%02x%02x_r%02d_i%03d" % (int(r * 255), int(g * 255), int(b * 255),
-                                             int(roughness * 99), int(ior * 100))
+    name = "look_%02x%02x%02x_r%02d_i%03d%s" % (int(r * 255), int(g * 255), int(b * 255),
+                                               int(roughness * 99), int(ior * 100),
+                                               "_w" if weave else "")
     path = "/World/Looks/" + name
     if not stage.GetPrimAtPath(path):
         mat = UsdShade.Material.Define(stage, path)
@@ -203,12 +212,52 @@ def matte_look(stage, colour, roughness=0.95, metallic=0.0, ior=1.2):
         # leaves only a faint sheen at grazing angles, which fabric does have.
         sh.CreateInput("ior", Sdf.ValueTypeNames.Float).Set(float(ior))
         sh.CreateInput("specularColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(0.01, 0.01, 0.01))
+
+        # Weave. Only on the fabric (weave=True): a hoop is not cloth. The
+        # texture reads primvars:st, which the builder authors face-varying so
+        # the tube's seam column does not smear a tile across the whole duct.
+        if weave and USE_WEAVE:
+            nrm = os.path.join(WEAVE_DIR, "weave_normal.png")
+            rgh = os.path.join(WEAVE_DIR, "weave_rough.png")
+            if os.path.exists(nrm):
+                st = UsdShade.Shader.Define(stage, path + "/stReader")
+                st.CreateIdAttr("UsdPrimvarReader_float2")
+                st.CreateInput("varname", Sdf.ValueTypeNames.Token).Set("st")
+                stout = st.CreateOutput("result", Sdf.ValueTypeNames.Float2)
+
+                tn = UsdShade.Shader.Define(stage, path + "/weaveNormal")
+                tn.CreateIdAttr("UsdUVTexture")
+                tn.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(nrm)
+                tn.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(stout)
+                tn.CreateInput("wrapS", Sdf.ValueTypeNames.Token).Set("repeat")
+                tn.CreateInput("wrapT", Sdf.ValueTypeNames.Token).Set("repeat")
+                # a normal map is stored biased into 0..1 and has to be mapped
+                # back to -1..1, or every normal leans one way and the surface
+                # looks lit from the wrong side.
+                tn.CreateInput("scale", Sdf.ValueTypeNames.Float4).Set(Gf.Vec4f(2, 2, 2, 1))
+                tn.CreateInput("bias", Sdf.ValueTypeNames.Float4).Set(Gf.Vec4f(-1, -1, -1, 0))
+                tn.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
+                sh.CreateInput("normal", Sdf.ValueTypeNames.Normal3f).ConnectToSource(
+                    tn.CreateOutput("rgb", Sdf.ValueTypeNames.Float3))
+
+                if os.path.exists(rgh):
+                    tr = UsdShade.Shader.Define(stage, path + "/weaveRough")
+                    tr.CreateIdAttr("UsdUVTexture")
+                    tr.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(rgh)
+                    tr.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(stout)
+                    tr.CreateInput("wrapS", Sdf.ValueTypeNames.Token).Set("repeat")
+                    tr.CreateInput("wrapT", Sdf.ValueTypeNames.Token).Set("repeat")
+                    tr.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")
+                    sh.GetInput("roughness").ClearSources()
+                    sh.CreateInput("roughness", Sdf.ValueTypeNames.Float).ConnectToSource(
+                        tr.CreateOutput("r", Sdf.ValueTypeNames.Float))
+
         mat.CreateSurfaceOutput().ConnectToSource(sh.ConnectableAPI(), "surface")
     _LOOKS[key] = path
     return path
 
 
-def bind_look(stage, prim, colour, roughness=0.95, metallic=0.0, ior=1.2):
+def bind_look(stage, prim, colour, roughness=0.95, metallic=0.0, ior=1.2, weave=False):
     """Bind a matte material. `prim` may be a UsdPrim, a schema object or a path."""
     from pxr import UsdShade
     if isinstance(prim, str):
@@ -217,7 +266,7 @@ def bind_look(stage, prim, colour, roughness=0.95, metallic=0.0, ior=1.2):
         prim = prim.GetPrim()
     if not prim or not prim.IsValid():
         return ""
-    path = matte_look(stage, colour, roughness, metallic, ior)
+    path = matte_look(stage, colour, roughness, metallic, ior, weave)
     mat = UsdShade.Material.Get(stage, path)
     if mat:
         UsdShade.MaterialBindingAPI.Apply(prim).Bind(mat)

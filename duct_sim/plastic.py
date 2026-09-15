@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import numpy as np
 import omni.usd
-from pxr import Sdf, UsdGeom, Vt
+from pxr import Gf, Sdf, UsdGeom, Vt
 
 
 def _fabric_points(path):
@@ -207,27 +207,54 @@ def bake_and_restart(stage=None, sim=None, verbose=True):
     return n
 
 
-def shrink_rest_shape(stage=None, factor=0.85, axis=0, verbose=True):
+def _duct_centreline(stage, sim_mesh_path):
+    """Hoop centres of the duct this sim mesh belongs to, in path order.
+
+    Each ring carries its own translate op, so this is exact for a duct that
+    curves -- which is the whole point: a track duct turns, and any global axis
+    stops describing it the moment it does.
+    """
+    root = Sdf.Path(sim_mesh_path)
+    while root.pathElementCount > 2:
+        root = root.GetParentPath()
+    prim = stage.GetPrimAtPath(root)
+    if not prim:
+        return None
+    centres = []
+    for child in sorted(prim.GetChildren(), key=lambda c: c.GetName()):
+        if not child.GetName().startswith("ring_"):
+            continue
+        for op in UsdGeom.Xformable(child).GetOrderedXformOps():
+            if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+                t = op.Get()
+                centres.append([float(t[0]), float(t[1]), float(t[2])])
+                break
+    return np.array(centres, dtype=np.float64) if len(centres) >= 2 else None
+
+
+def shrink_rest_shape(stage=None, factor=0.85, axis=None, verbose=True):
     """Make the fabric WANT to be narrower than it is, so it pulls tight.
 
     The other route -- drawing the fabric inside the hoops and constraining it
     as if it touched them -- cannot work: an attachment records the gap it was
     built with and preserves it, measured at 146.0 mm with and without
     enableRigidSurfaceAttachments. Tension has to come from the rest state
-    instead of from the constraint.
+    rather than from the constraint.
 
-    So: leave the fabric where it is, and rewrite its REST shape to a narrower
-    tube. The solver then pulls every vertex inward; the hoops block that at
-    each station, so the fabric goes taut over them and cinches between --
-    which is the corrugated profile of real ducting.
+    So: leave the fabric where it is and rewrite its REST shape to a narrower
+    tube. The solver pulls every vertex inward; the hoops block that at each
+    station, so the fabric goes taut over them and cinches between.
 
-    Only the cross-section is shrunk, not the length. Scaling the rest shape
-    uniformly would shorten the duct too and drag the hoops together, since
-    nothing joins them but the fabric.
+    Only the cross-section shrinks, never the length. Scaling the rest shape
+    uniformly would shorten the duct and drag the hoops together, since nothing
+    joins them but the fabric.
 
-    `axis` is the index of the duct's long axis (0 = x). Points are binned along
-    it and scaled about each bin's own centre, so this needs no knowledge of how
-    the cooked mesh happens to be ordered.
+    Each vertex is assigned to its NEAREST HOOP and scaled in the plane normal
+    to the centreline there. The first version binned along a world axis, which
+    is right only for a duct lying along that axis: on the track, a duct running
+    in y put its whole length into one bin -- 8,040 points in 60 "rings" where a
+    ring is 40 points -- and got squashed about the duct's own centre instead of
+    narrowed. `axis` is kept for call compatibility and ignored.
     """
     stage = stage or omni.usd.get_context().get_stage()
     n_done = 0
@@ -242,47 +269,48 @@ def shrink_rest_shape(stage=None, factor=0.85, axis=0, verbose=True):
         if pts is None or not len(pts):
             continue
 
-        rest = pts.copy()
-        other = [i for i in range(3) if i != axis]
-        # bin along the long axis; each ring of vertices shrinks about its own
-        # centre rather than about the duct's overall centroid
-        order = np.argsort(pts[:, axis])
-        span = float(pts[:, axis].max() - pts[:, axis].min())
-        nbins = max(1, int(round(span / 0.01)))
-        edges = np.linspace(pts[:, axis].min() - 1e-6,
-                            pts[:, axis].max() + 1e-6, nbins + 1)
-        idx = np.clip(np.digitize(pts[:, axis], edges) - 1, 0, nbins - 1)
-        for b in range(nbins):
-            sel = np.where(idx == b)[0]
-            if len(sel) < 3:
-                continue
-            c = pts[sel][:, other].mean(axis=0)
-            rest[np.ix_(sel, other)] = c + (pts[sel][:, other] - c) * factor
-
-        tri_attr = prim.GetAttribute("omniphysics:restTriVtxIndices")
-        if not tri_attr or tri_attr.Get() is None:
+        centres = _duct_centreline(stage, path)
+        if centres is None:
+            if verbose:
+                print(f"[taut] {path}: no centreline found, skipped", flush=True)
             continue
-        prim.GetAttribute("omniphysics:restShapePoints").Set(
-            Vt.Vec3fArray.FromNumpy(rest.astype(np.float32)))
 
-        tris = np.array(tri_attr.Get(), dtype=np.int64)
-        pairs = _adjacent_triangle_pairs(tris)
-        if pairs:
-            angles = _dihedral_angles(rest, tris, pairs)
-            ap = prim.GetAttribute("omniphysics:restAdjTriPairs")
-            if not ap or not ap.IsValid():
-                ap = prim.CreateAttribute("omniphysics:restAdjTriPairs",
-                                          Sdf.ValueTypeNames.Int2Array)
-            ap.Set(Vt.Vec2iArray([(int(a), int(b)) for a, b, _, _ in pairs]))
-            ba = prim.GetAttribute("omniphysics:restBendAngles")
-            if not ba or not ba.IsValid():
-                ba = prim.CreateAttribute("omniphysics:restBendAngles",
-                                          Sdf.ValueTypeNames.FloatArray)
-            ba.Set(Vt.FloatArray(angles.tolist()))
+        # nearest hoop for every vertex
+        d = pts[:, None, :] - centres[None, :, :]
+        near = np.argmin((d * d).sum(axis=2), axis=1)
+
+        # local tangent, central difference along the centreline
+        tang = np.gradient(centres, axis=0)
+        nrm = np.linalg.norm(tang, axis=1, keepdims=True)
+        tang = tang / np.where(nrm < 1e-12, 1.0, nrm)
+
+        c, t = centres[near], tang[near]
+        rel = pts - c
+        along = (rel * t).sum(axis=1, keepdims=True) * t   # length preserved
+        perp = rel - along                                  # section shrunk
+        rest = c + along + perp * factor
+
+        prim.CreateAttribute("omniphysics:restShapePoints",
+                             Sdf.ValueTypeNames.Point3fArray).Set(
+            Vt.Vec3fArray([Gf.Vec3f(*q) for q in rest]))
+
+        tris = prim.GetAttribute("omniphysics:restTriVtxIndices")
+        tris = tris.Get() if tris else None
+        if tris is None:
+            tris = prim.GetAttribute("faceVertexIndices").Get()
+        if tris is not None:
+            tri = np.array(tris, dtype=np.int64).reshape(-1, 3)
+            pairs = _adjacent_triangle_pairs(tri)
+            if len(pairs):
+                ang = _dihedral_angles(rest, tri, pairs)
+                prim.CreateAttribute("omniphysics:restBendAngles",
+                                     Sdf.ValueTypeNames.FloatArray).Set(
+                    Vt.FloatArray([float(a) for a in ang]))
+
         n_done += 1
         if verbose:
             print(f"[taut] {path}: rest cross-section x{factor:.2f} "
-                  f"({len(pts)} pts, {nbins} rings)", flush=True)
+                  f"({len(pts)} pts over {len(centres)} hoops)", flush=True)
 
     if verbose:
         print(f"[taut] rest shape narrowed on {n_done} sleeve(s)", flush=True)
