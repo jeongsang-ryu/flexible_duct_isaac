@@ -25,6 +25,8 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--length", type=float, default=2.0)
 ap.add_argument("--spacing", type=float, default=0.10)
 ap.add_argument("--clearance", type=float, default=-0.050)
+ap.add_argument("--shrink", type=float, default=0.80,
+                help="rest cross-section factor for the shrink case")
 ap.add_argument("--n-circ", type=int, default=32)
 ap.add_argument("--steps", type=int, default=900)
 args = ap.parse_args()
@@ -56,10 +58,35 @@ hoop_inner = spec.radius - spec.ring_thickness
 print(f"\nfabric authored at {authored_r*1e3:.1f} mm; hoop inner surface at "
       f"{hoop_inner*1e3:.1f} mm; gap {(hoop_inner-authored_r)*1e3:.1f} mm",
       flush=True)
-print(f"\n{'taut':>6} {'r at hoop':>12} {'r between':>12} {'verdict':>28}", flush=True)
-print("-" * 62, flush=True)
+print(f"\n{'case':>10} {'r at hoop':>12} {'r between':>12} {'verdict':>28}", flush=True)
+print("-" * 78, flush=True)
 
-for taut in (False, True):
+# third case: fabric drawn ON the hoops, but its REST cross-section narrowed so
+# it pulls itself tight against them
+# The shrink case contracted the fabric AT the hoops as well as between them,
+# with 504 bonds authored and surviving the restart. Counting USD children
+# proves authoring, not that the solver is honouring them. Pinning the hoops
+# separates the two: if the fabric still pulls off a STATIC hoop, the bond is
+# not doing anything; if it holds there and cinches between, the mechanism
+# works and the free hoops were simply being dragged along.
+CASES = [("off", False, 0.0, args.clearance, False),
+         ("taut", True, 0.0, args.clearance, False),
+         ("shrink", False, args.shrink, -0.004, False),
+         ("shrink+pin", False, args.shrink, -0.004, True),
+         # Pinning changed nothing, so the bonds are not surviving the restart
+         # in the solver even though their prims survive in USD. Re-authoring
+         # them AFTER the restart is the remaining option: stop resets the
+         # fabric to its authored radius, so seams rebuilt there capture it ON
+         # the hoops, and only then does it try to shrink away from them.
+         ("shrink+rebond", False, args.shrink, -0.004, False),
+         # CONTROL, and it matters beyond this feature: stop/play with NO rest
+         # change. Bake (R) restarts the sim too, so if a plain restart is what
+         # drops the attachments then bake is broken in the same way and the
+         # duct comes apart after every bake.
+         ("restart-only", False, -1.0, -0.004, False)]
+
+for label, taut, shrink, clearance, pin in CASES:
+    rebond = label.endswith("rebond")
     ctx = omni.usd.get_context()
     ctx.new_stage()
     stage = ctx.get_stage()
@@ -90,13 +117,43 @@ for taut in (False, True):
         surface_bend_stiffness=1e-3)
 
     root, rings, _, n_bound = spawn_duct_path(
-        stage, 0, stations, spec, MAT, clearance=args.clearance,
+        stage, 0, stations, spec, MAT, clearance=clearance,
         n_circ=args.n_circ, taut=taut, verbose=False)
+    drawn_r = (spec.radius - spec.ring_thickness + clearance)
+
+    if pin:
+        for rp_path in rings:
+            mp = UsdPhysics.MassAPI.Get(stage, rp_path)
+            if not mp:
+                mp = UsdPhysics.MassAPI.Apply(stage.GetPrimAtPath(rp_path))
+            mp.CreateDensityAttr(0.0)      # static: nothing drags it inward
 
     sim = SimulationContext(stage_units_in_meters=1.0, device="cuda")
     sim.initialize_physics()
     sp.GetAttribute("physxScene:enableGPUDynamics").Set(True)
     sim.play()
+    if shrink < 0:            # restart with no rest change: the control
+        for _ in range(120):
+            sim.step(render=False)
+        sim.stop()
+        sim.play()
+    if shrink > 0:
+        # the rest arrays only exist once the body has been cooked, so let it
+        # run briefly, narrow the rest shape, then stop/play so PhysX re-cooks
+        for _ in range(120):
+            sim.step(render=False)
+        from duct_sim.plastic import shrink_rest_shape
+        shrink_rest_shape(stage, factor=shrink, axis=0, verbose=False)
+        sim.stop()
+        if rebond:
+            from duct_sim.builder import rebuild_seams
+            rebuild_seams(stage, -1, verbose=False)
+        sim.play()
+        _after = 0
+        for c in stage.GetPrimAtPath(f"{root}/skin").GetChildren():
+            if c.GetName().startswith("seam"):
+                _after += len(c.GetChildren())
+        print(f"       bonds before restart {n_bound}, after {_after}", flush=True)
     for _ in range(args.steps):
         sim.step(render=False)
 
@@ -117,13 +174,26 @@ for taut in (False, True):
     mid_i = n // 2
     x_hoop = stations[mid_i][0]
     x_between = x_hoop + args.spacing * 0.5
-    r_hoop = radius_near(x_hoop, args.spacing * 0.15)
-    r_between = radius_near(x_between, args.spacing * 0.15)
+    r_hoop = radius_near(x_hoop, args.spacing * 0.25)
+    r_between = radius_near(x_between, args.spacing * 0.25)
 
-    pulled = abs(r_hoop - hoop_inner) < abs(r_hoop - authored_r)
-    verdict = "PULLED OUT to the hoop" if pulled else "stayed where it was drawn"
-    print(f"{str(taut):>6} {r_hoop*1e3:10.1f} mm {r_between*1e3:10.1f} mm "
-          f"{verdict:>28}", flush=True)
+    moved = r_hoop - drawn_r
+    if shrink < 0:
+        verdict = ("bonds HELD across restart" if abs(r_hoop - drawn_r) < 0.005
+                   else "bonds LOST across restart")
+    elif shrink > 0:
+        verdict = ("CINCHED between hoops" if (r_between < r_hoop - 0.002)
+                   else "no waist formed")
+    else:
+        verdict = ("PULLED OUT to the hoop"
+                   if abs(r_hoop - hoop_inner) < abs(r_hoop - drawn_r)
+                   else "stayed where it was drawn")
+    # n_bound is the decisive diagnostic: the fabric contracting AT the hoops
+    # means the hoops are not holding it, and "held but overpowered" looks
+    # nothing like "never bound in the first place"
+    print(f"{label:>10} {r_hoop*1e3:10.1f} mm {r_between*1e3:10.1f} mm "
+          f"{verdict:>28}   (drawn {drawn_r*1e3:.1f}, {n_bound} bonds)",
+          flush=True)
 
     sim.stop()
     sim.clear_instance()

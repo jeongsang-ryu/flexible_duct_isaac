@@ -40,6 +40,11 @@ ap.add_argument("--spacing", type=float, default=0.05,
                      "this doubles the hoop and sleeve count per metre")
 ap.add_argument("--height", type=float, default=0.5, help="spawn height [m]")
 ap.add_argument("--n-circ", type=int, default=28)
+ap.add_argument("--solid-hoop", action="store_true",
+                help="one convex disc per hoop instead of 16 capsules. The "
+                     "capsule chain is the most expensive thing in a track: "
+                     "1,629 hoops x 16 = 26,064 shapes cost 17.4 ms/step with "
+                     "no fabric at all, vs 8.4 ms for the whole deformable.")
 ap.add_argument("--cloth-roughness", type=float, default=0.97,
                 help="fabric surface roughness: 1.0 = pure matte cloth, "
                      "0.3 = glossy rubber. Prims with no bound material get "
@@ -182,7 +187,7 @@ import carb.settings  # noqa: E402
 import numpy as np  # noqa: E402
 import omni.usd  # noqa: E402
 from omni.physx.scripts import deformableUtils  # noqa: E402
-from pxr import Gf, Sdf, UsdGeom, UsdLux, UsdPhysics  # noqa: E402
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux, UsdPhysics  # noqa: E402
 
 from duct_sim.builder import (min_segments, rebuild_seams, spawn_duct,  # noqa: E402
                                spawn_duct_fem, spawn_duct_path,
@@ -434,7 +439,7 @@ def _do_spawn_now(length_m):
                     "filtering_offset": (None if state["filtering"] < 0
                                          else state["filtering"])})
         fn(stage, idx, n_rings, args.spacing, spec, MAT,
-           origin=origin, n_circ=args.n_circ, **kw)
+           origin=origin, n_circ=args.n_circ, solid_hoop=args.solid_hoop, **kw)
         state["n_ducts"] = idx + 1
         _refresh_dragger()
     except Exception as exc:
@@ -623,6 +628,7 @@ if args.layout:
             smooth_render=not args.no_smooth_render,
             speculative_ccd=not args.no_ccd,
             taut=args.taut, surface_sampling=args.surface_sampling,
+            solid_hoop=args.solid_hoop,
             filtering_offset=(None if state["filtering"] < 0
                               else state["filtering"]))
         state["n_ducts"] = _i + 1
@@ -659,13 +665,48 @@ if args.frame:
     _xf.ClearXformOpOrder()
     _xf.AddTransformOp().Set(
         Gf.Matrix4d().SetLookAt(_eye, _tgt, Gf.Vec3d(0, 0, 1)).GetInverse())
+    _look = Gf.Matrix4d().SetLookAt(_eye, _tgt, Gf.Vec3d(0, 0, 1)).GetInverse()
+    _shown = False
     try:
         from omni.kit.viewport.utility import get_active_viewport
         get_active_viewport().camera_path = "/World/cam"
-        print(f"[build] camera {_dist:.1f} m back, framing {_W} x {_D} m",
-              flush=True)
+        _shown = True
     except Exception as exc:
         print(f"[build] viewport retarget failed: {exc}", flush=True)
+
+    # Retargeting the viewport reports success and then silently does not stick
+    # on a large stage -- the header still says Perspective and the shot comes
+    # back as empty floor. Driving the persp camera itself always holds, so do
+    # both. It lives on the session layer, which has to be the edit target or
+    # the op is authored somewhere the viewport never reads.
+    try:
+        _persp = stage.GetPrimAtPath("/OmniverseKit_Persp")
+        if _persp:
+            with Usd.EditContext(stage, stage.GetSessionLayer()):
+                _pxf = UsdGeom.Xformable(_persp)
+                for _op in _pxf.GetOrderedXformOps():
+                    _persp.RemoveProperty(_op.GetOpName())
+                _pxf.ClearXformOpOrder()
+                _pxf.AddTransformOp().Set(_look)
+                UsdGeom.Camera(_persp).CreateFocalLengthAttr(FOCAL)
+                UsdGeom.Camera(_persp).CreateHorizontalApertureAttr(HAP)
+            _shown = True
+    except Exception as exc:
+        print(f"[build] persp camera move failed: {exc}", flush=True)
+
+    # READ IT BACK. Both the viewport retarget and the persp override report
+    # success and then do not hold -- Kit's camera manipulator rewrites the
+    # persp transform every frame from its own state. Believing the success
+    # message put three empty-floor screenshots on the record.
+    try:
+        from omni.kit.viewport.utility import get_active_viewport
+        _vp_now = str(get_active_viewport().camera_path)
+    except Exception as exc:
+        _vp_now = f"<unreadable: {exc}>"
+    print(f"[build] camera {_dist:.1f} m back, framing {_W} x {_D} m; "
+          f"eye ({_eye[0]:.1f}, {_eye[1]:.1f}, {_eye[2]:.1f}); "
+          f"viewport is on {_vp_now}", flush=True)
+    _camera_wanted = "/World/cam"
 
 print(f"[build] running. N/panel = spawn, SHIFT+drag = place, "
       f"R = bake, S = save -> {args.out}", flush=True)
@@ -693,6 +734,7 @@ import time  # noqa: E402
 
 _t0 = time.perf_counter()
 _acc = 0.0
+_perf_last_acc, _perf_last_step = 0.0, 0
 step = 0
 while app.is_running():
     if state["pending_spawn"]:
@@ -780,14 +822,34 @@ while app.is_running():
         except Exception as exc:
             print(f"[build] drag error: {exc}", flush=True)
             state["dragger"] = None
+    if args.frame and step < 120 and step % 10 == 0:
+        # Re-assert every 10 frames through start-up: one set at build time is
+        # overwritten while the stage is still loading.
+        try:
+            from omni.kit.viewport.utility import get_active_viewport as _gav
+            _vp = _gav()
+            if str(_vp.camera_path) != _camera_wanted:
+                _vp.camera_path = _camera_wanted
+                if step == 0:
+                    print(f"[build] re-asserted camera -> {_vp.camera_path}",
+                          flush=True)
+        except Exception:
+            pass
     _a = time.perf_counter()
     sim.step(render=True)
     _acc += time.perf_counter() - _a
     step += 1
     if args.perf_every and step % args.perf_every == 0:
         _mb = _gpu_mb()
-        print(f"[perf] {step:6d} steps  {_acc / step * 1e3:6.1f} ms/step  "
-              f"{step / (time.perf_counter() - _t0):5.1f} fps  "
-              f"GPU {_mb} MiB", flush=True)
+        # MARGINAL, not cumulative. A cumulative average never sheds start-up
+        # -- cooking, the first contacts, a stop/play restart -- so it keeps
+        # reporting a rate the sim is no longer running at. Only the interval
+        # since the last report says how fast it is going NOW.
+        _win = _acc - _perf_last_acc
+        _wsteps = step - _perf_last_step
+        print(f"[perf] {step:6d} steps  {_win / _wsteps * 1e3:7.1f} ms/step "
+              f"marginal  ({_acc / step * 1e3:7.1f} cumulative)  "
+              f"{_wsteps / _win:5.1f} fps  GPU {_mb} MiB", flush=True)
+        _perf_last_acc, _perf_last_step = _acc, step
 
 app.close()

@@ -104,6 +104,29 @@ def min_segments(tube_r: float, hoop_r: float, margin: float = 2.0) -> int:
     return max(8, int(math.ceil(math.pi / math.acos(1.0 - want / hoop_r))))
 
 
+def _hoop_mass(prim, spec, solid):
+    """Give a hoop its mass, never a density when it is a solid disc.
+
+    A density on a SOLID stand-in for a thin shell is wrong by the ratio of the
+    volumes, and that ratio is large: the disc is pi*(R+t)^2*2t against the
+    ring's 2*pi^2*R*t^2 -- 3,389 cm3 against 568, so 6.0x. A 3 m duct went from
+    7 kg to 42 kg and fell over like dominoes the moment it was played.
+
+    Third time this exact trap has bitten: 195 kg/m3 on solid rigid sleeves made
+    a 139 kg duct, and 120 kg/m3 on a solid FEM cylinder made a 90 kg one. The
+    rule that came out of those is the rule here -- a solid volume standing in
+    for a thin wall has its MASS set, not its density.
+    """
+    import math as _m
+    api = UsdPhysics.MassAPI.Apply(prim)
+    if not solid:
+        api.CreateDensityAttr(spec.ring_density)
+        return
+    R = spec.diameter * 0.5
+    t = getattr(spec, "ring_tube", 0.012)
+    torus_volume = 2.0 * _m.pi ** 2 * R * t ** 2
+    api.CreateMassAttr(float(torus_volume * spec.ring_density))
+
 def spawn_duct_single(
     stage,
     index: int,
@@ -129,6 +152,7 @@ def spawn_duct_single(
     cloth_colour=(0.78, 0.60, 0.05),
     weave_tile: float = 0.04,       # metres of duct per weave texture tile
     anchor_ends: bool = False,
+    solid_hoop: bool = False,     # one convex disc per hoop, not 16 capsules
     verbose: bool = True,
 ):
     """ONE continuous fabric tube with the hoops INSIDE it, sewn along the outside.
@@ -168,7 +192,8 @@ def spawn_duct_single(
     for i in range(n_rings):
         t = -span / 2 + spacing * i
         path = f"{root}/ring_{i:03d}"
-        create_ring(stage, path, R, TUBE, n_seg=spec.ring_segments)
+        create_ring(stage, path, R, TUBE, n_seg=spec.ring_segments,
+                    solid=solid_hoop)
         prim = stage.GetPrimAtPath(path)
         xf = UsdGeom.Xformable(prim)
         xf.AddTranslateOp().Set(Gf.Vec3d(ox + ux * t, oy + uy * t, oz))
@@ -185,8 +210,10 @@ def spawn_duct_single(
                 UsdGeom.Imageable(seg).CreateVisibilityAttr().Set("invisible")
         UsdPhysics.RigidBodyAPI.Apply(prim)
         is_end = anchor_ends and i in (0, n_rings - 1)
-        UsdPhysics.MassAPI.Apply(prim).CreateDensityAttr(
-            0.0 if is_end else spec.ring_density)
+        if is_end:
+            UsdPhysics.MassAPI.Apply(prim).CreateDensityAttr(0.0)
+        else:
+            _hoop_mass(prim, spec, solid_hoop)
         ring_paths.append(path)
 
     # --- the single sleeve, offset clear of the hoop tube ---
@@ -369,6 +396,7 @@ def spawn_duct(
     anchor_ends: bool = False,
     overlap_offset: float = 0.006,
     filtering_offset: float = 0.012,
+    solid_hoop: bool = False,     # one convex disc per hoop, not 16 capsules
     verbose: bool = True,
 ):
     """Create duct `index`. Returns (root_path, ring_paths, n_sleeves, n_bound)."""
@@ -385,7 +413,8 @@ def spawn_duct(
     for i in range(n_rings):
         t = -span / 2 + spacing * i
         path = f"{root}/ring_{i:03d}"
-        create_ring(stage, path, R, TUBE, n_seg=spec.ring_segments)
+        create_ring(stage, path, R, TUBE, n_seg=spec.ring_segments,
+                    solid=solid_hoop)
         prim = stage.GetPrimAtPath(path)
         xf = UsdGeom.Xformable(prim)
         xf.AddTranslateOp().Set(Gf.Vec3d(ox + ux * t, oy + uy * t, oz))
@@ -403,8 +432,10 @@ def spawn_duct(
                 UsdGeom.Imageable(seg).CreateVisibilityAttr().Set("invisible")
         UsdPhysics.RigidBodyAPI.Apply(prim)
         is_end = anchor_ends and i in (0, n_rings - 1)
-        UsdPhysics.MassAPI.Apply(prim).CreateDensityAttr(
-            0.0 if is_end else spec.ring_density)
+        if is_end:
+            UsdPhysics.MassAPI.Apply(prim).CreateDensityAttr(0.0)
+        else:
+            _hoop_mass(prim, spec, solid_hoop)
         ring_paths.append(path)
 
     # axial resolution chosen so the elements come out roughly square; holding
@@ -581,6 +612,7 @@ def spawn_duct_path(
     ring_colour=(0.03, 0.03, 0.03),
     cloth_colour=(0.78, 0.60, 0.05),
     weave_tile: float = 0.04,       # metres of duct per weave texture tile
+    solid_hoop: bool = False,     # one convex disc per hoop, not 16 capsules
     verbose: bool = True,
 ):
     """A duct that FOLLOWS a drawn centreline instead of running straight.
@@ -608,7 +640,8 @@ def spawn_duct_path(
     ring_paths = []
     for i, (x, y, h) in enumerate(stations):
         path = f"{root}/ring_{i:04d}"
-        create_ring(stage, path, R, TUBE, n_seg=spec.ring_segments)
+        create_ring(stage, path, R, TUBE, n_seg=spec.ring_segments,
+                    solid=solid_hoop)
         prim = stage.GetPrimAtPath(path)
         xf = UsdGeom.Xformable(prim)
         xf.AddTranslateOp().Set(Gf.Vec3d(float(x), float(y), float(z)))
@@ -621,7 +654,7 @@ def spawn_duct_path(
             if rib_visual:
                 UsdGeom.Imageable(seg).CreateVisibilityAttr().Set("invisible")
         UsdPhysics.RigidBodyAPI.Apply(prim)
-        UsdPhysics.MassAPI.Apply(prim).CreateDensityAttr(spec.ring_density)
+        _hoop_mass(prim, spec, solid_hoop)
         ring_paths.append(path)
 
     cloth_r = (R + TUBE + clearance) if clearance >= 0 else (R - TUBE + clearance)

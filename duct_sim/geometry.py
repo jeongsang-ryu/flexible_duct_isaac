@@ -55,9 +55,35 @@ def create_ring(
     tube_radius: float,
     n_seg: int = 16,
     with_collision: bool = True,
+    solid: bool = False,
 ) -> UsdGeom.Xform:
-    """A hoop at `path`, centred on the origin of its own frame, in the XY plane."""
+    """A hoop at `path`, centred on the origin of its own frame, in the XY plane.
+
+    `solid=True` replaces the n_seg capsules with ONE thin cylinder -- a disc
+    rather than a ring. Measured on the 81 m track, the capsule chain is the
+    single most expensive thing in the scene: 1,629 hoops x 16 capsules =
+    26,064 collision shapes cost 17.4 ms/step with no fabric present at all,
+    against 8.4 ms for the entire deformable. Halving n_seg alone took physics
+    from 25.9 to 16.0 ms.
+
+    The chain existed because a torus is non-convex and PhysX rigid shapes must
+    be convex. Filling the middle removes that constraint entirely: a cylinder
+    IS convex. Nothing is lost, because the fabric's collision is filtered
+    inside the seam band anyway, so the hoop's interior never touches it, and
+    the outer silhouette -- the only part anything else can hit -- is the same.
+    The duct is a barrier lying on the ground; nothing passes through its bore.
+    Keeps the same prim layout (one child under an Xform) so seams, visibility
+    and the dragger are unaffected.
+    """
     xform = UsdGeom.Xform.Define(stage, path)
+    if solid:
+        disc = UsdGeom.Cylinder.Define(stage, f"{path}/disc")
+        disc.CreateAxisAttr("Z")
+        disc.CreateRadiusAttr(float(radius + tube_radius))
+        disc.CreateHeightAttr(float(2.0 * tube_radius))
+        if with_collision:
+            UsdPhysics.CollisionAPI.Apply(disc.GetPrim())
+        return xform
     for i, (mid, rot, half_h) in enumerate(ring_segment_transforms(radius, n_seg)):
         seg_path = f"{path}/seg_{i:02d}"
         cap = UsdGeom.Capsule.Define(stage, seg_path)
