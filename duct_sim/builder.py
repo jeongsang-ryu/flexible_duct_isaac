@@ -125,7 +125,18 @@ def _hoop_mass(prim, spec, solid):
     R = spec.diameter * 0.5
     t = getattr(spec, "ring_tube", 0.012)
     torus_volume = 2.0 * _m.pi ** 2 * R * t ** 2
-    api.CreateMassAttr(float(torus_volume * spec.ring_density))
+    m = float(torus_volume * spec.ring_density)
+    api.CreateMassAttr(m)
+
+    # INERTIA TOO, for the same reason as the mass. PhysX derives the inertia
+    # tensor from the collision shape, so a solid disc gets disc inertia:
+    # mR^2/2 axial against a thin ring's mR^2, and mR^2/4 diametral against
+    # mR^2/2. Same mass, but 1.77x easier to tip over -- which is exactly the
+    # "it dominoes when I push it lightly" symptom, and setting only the mass
+    # does not touch it. A hoop's mass sits at its rim, so author the thin-ring
+    # tensor explicitly. Ring lies in its local XY plane, so z is the axis.
+    api.CreateDiagonalInertiaAttr(
+        Gf.Vec3f(0.5 * m * R * R, 0.5 * m * R * R, m * R * R))
 
 def spawn_duct_single(
     stage,
