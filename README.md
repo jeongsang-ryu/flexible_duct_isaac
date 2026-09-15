@@ -144,7 +144,16 @@ The cloth is almost free; Isaac is not — 38 sleeves versus 1 cost **2 MiB** an
 ```
 duct_sim/    spec · geometry · builder · layout · freeze · plastic · mouse_drag
 scripts/     duct_build_gui.py (the tool) · record_gui.sh · test_*.py
-tools/       track_planner.html
+tools/       track_planner.html · duct_chain.js · chain_test.html
+```
+
+The planner's chain maths sits in `duct_chain.js` so the page and
+`chain_test.html` run the same code — it shipped once with a bug that only
+appeared while dragging (posts smaller than the node spacing slipped between
+two nodes and the duct sailed through). Open `chain_test.html` in a browser, or:
+
+```bash
+google-chrome --headless --dump-dom tools/chain_test.html | grep -o 'PASS.*\|FAIL.*'
 ```
 
 ## Open

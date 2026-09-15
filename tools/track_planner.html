@@ -160,9 +160,11 @@ code{font:11.5px ui-monospace,Menlo,monospace; background:var(--field);
   </main>
 </div>
 
+<script src="duct_chain.js"></script>
 <script>
 (function(){
 "use strict";
+const DC=window.DuctChain;
 const cv=document.getElementById("cv"), ctx=cv.getContext("2d");
 const $=id=>document.getElementById(id);
 
@@ -181,59 +183,15 @@ function snap(){ S.hist.push(JSON.stringify({r:S.runs,a:S.anchors})); if(S.hist.
 const snapM=v=>S.snap?Math.round(v*4)/4:Math.round(v*1000)/1000;
 
 // ---- model -------------------------------------------------------------
-// A duct is a chain of nodes a FIXED distance apart. That is what makes the
-// length a real constraint rather than a number in a box: dragging can only
-// reposition the chain, never lengthen it.
+// The chain maths lives in duct_chain.js so the page and the test harness run
+// the SAME code. It shipped once with a bug that only appeared while dragging
+// (segments cut through posts between nodes); the tests exist because of it.
 function makeDuct(lengthM, nodeSpacing, cx, cy){
-  const n = Math.max(2, Math.round(lengthM/nodeSpacing)+1);
-  const seg = lengthM/(n-1);
-  const pts = [];
-  for(let i=0;i<n;i++) pts.push([cx - lengthM/2 + seg*i, cy]);
-  return {name:"duct "+(S.runs.length+1), seg, pts};
+  return DC.makeDuct(lengthM, nodeSpacing, cx, cy, "duct "+(S.runs.length+1));
 }
-
-function chainLength(r){ return r.seg*(r.pts.length-1); }
-
-// Jakobsen relaxation: pull every pair back to the rest length so the duct can
-// be repositioned but never stretched. Between passes, any node that has ended
-// up inside a post is pushed back out to its edge -- which is what makes the
-// body wrap AROUND an obstacle instead of through it, the way a rope laid round
-// a peg does. The posts are fixed points in the world; the duct is what moves.
-function pushOutOfAnchors(pts, held){
-  for(let i=0;i<pts.length;i++){
-    if(i===held) continue;
-    for(const a of S.anchors){
-      let dx=pts[i][0]-a.x, dy=pts[i][1]-a.y;
-      let d=Math.hypot(dx,dy);
-      const R=a.r;
-      if(d<R){
-        if(d<1e-9){ dx=1; dy=0; d=1; }
-        pts[i][0]=a.x+dx/d*R;
-        pts[i][1]=a.y+dy/d*R;
-      }
-    }
-  }
-}
-
-function relax(r, held){
-  const L=r.seg, pts=r.pts;
-  for(let it=0; it<60; it++){
-    for(let i=0;i<pts.length-1;i++){
-      const a=pts[i], b=pts[i+1];
-      let dx=b[0]-a[0], dy=b[1]-a[1];
-      let d=Math.hypot(dx,dy);
-      if(d<1e-9){ dx=1e-6; dy=0; d=1e-6; }
-      const corr=(d-L)/d;
-      const wa=(i===held)?0:1, wb=(i+1===held)?0:1;
-      const tot=wa+wb; if(!tot) continue;
-      if(wa){ a[0]+=dx*corr*(wa/tot); a[1]+=dy*corr*(wa/tot); }
-      if(wb){ b[0]-=dx*corr*(wb/tot); b[1]-=dy*corr*(wb/tot); }
-    }
-    pushOutOfAnchors(pts, held);
-  }
-}
-
-function relaxAll(){ S.runs.forEach(r=>relax(r,-1)); }
+const chainLength = DC.chainLength;
+const relax   = (r, held) => DC.relax(r, S.anchors, S.duct.dia/2, held);
+const relaxAll = () => S.runs.forEach(r => DC.relax(r, S.anchors, S.duct.dia/2, -1));
 
 // ---- view --------------------------------------------------------------
 let V={s:20,ox:0,oy:0};
