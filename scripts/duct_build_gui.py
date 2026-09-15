@@ -46,6 +46,15 @@ ap.add_argument("--layout", default="",
                 help="track JSON exported from the planner: builds one duct "
                      "per drawn run, following the centreline")
 ap.add_argument("--ground", type=float, default=40.0, help="ground plane size [m]")
+ap.add_argument("--rigid", action="store_true",
+                help="build the duct from black discs and yellow sleeves hinged "
+                     "by compliant joints, with no cloth at all. ~16x fewer "
+                     "collision shapes; cannot crumple or drape.")
+ap.add_argument("--bend-limit", type=float, default=14.0,
+                help="--rigid: bend allowed per joint [deg]")
+ap.add_argument("--stiffness", type=float, default=8.0,
+                help="--rigid: joint drive stiffness (the compliance)")
+ap.add_argument("--damping", type=float, default=2.0)
 ap.add_argument("--posts", action="store_true",
                 help="also build the planner's posts as static colliders. Off "
                      "by default: they shape the layout in 2-D and the drawn "
@@ -123,7 +132,8 @@ from omni.physx.scripts import deformableUtils  # noqa: E402
 from pxr import Gf, Sdf, UsdGeom, UsdLux, UsdPhysics  # noqa: E402
 
 from duct_sim.builder import (min_segments, rebuild_seams, spawn_duct,  # noqa: E402
-                               spawn_duct_path, spawn_duct_single)
+                               spawn_duct_path, spawn_duct_rigid,
+                               spawn_duct_single)
 from duct_sim.freeze import freeze_to_usd  # noqa: E402
 from duct_sim.spec import DuctSpec  # noqa: E402
 from isaacsim.core.api import SimulationContext  # noqa: E402
@@ -444,6 +454,13 @@ if args.layout:
         _st = resample(_run.get("points", []), _sp)
         if len(_st) < 2:
             print(f"[build] run {_i} has too few points; skipped", flush=True)
+            continue
+        if args.rigid:
+            spawn_duct_rigid(stage, _i, _st, spec,
+                             bend_limit_deg=args.bend_limit,
+                             stiffness=args.stiffness, damping=args.damping,
+                             density=spec.ring_density / 40.0)
+            state["n_ducts"] = _i + 1
             continue
         spawn_duct_path(
             stage, _i, _st, spec, MAT,

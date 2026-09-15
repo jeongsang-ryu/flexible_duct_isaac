@@ -157,8 +157,26 @@ look 101× slower than real time when the honest number is 7.6×, and that
 difference is the whole answer to whether it can be used for RL.
 
 The bottleneck is the hoop colliders, not the cloth: CPU sat at 386 % while the
-GPU idled at 2–9 %. Halving the hoop spacing and the capsule count is worth
-~4× and is untried.
+GPU idled at 2–9 %.
+
+### `--rigid`: the same track without cloth
+
+Acting on that, a second build drops the deformable entirely. Each hoop becomes
+one thin black disc and each gap one yellow cylinder, hinged by D6 joints whose
+rotational drives supply the compliance. Same track, measured side by side:
+
+| | cloth | `--rigid` |
+|---|---|---|
+| collision shapes | 52,128 | **3,249** |
+| step (marginal) | 63.5 ms | **19.6 ms** |
+| vs real time | 7.6× | **2.3×** |
+| GPU memory | 10.4 GB | **4.1 GB** |
+| build | ~25 min | **~2 min** |
+
+It cannot crumple, fold or drape — the cross-section stays circular, so a car
+meets a compliant tube rather than a bag. For a track barrier that is arguably
+the better model, and it is the difference between watching a replay and
+running one.
 
 ---
 

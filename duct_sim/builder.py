@@ -678,3 +678,137 @@ def spawn_duct_path(
               f"{len(tris)} tris, {n_bound} seam elements "
               f"({'OK' if n_bound else 'ZERO -- FABRIC NOT ATTACHED'})", flush=True)
     return root, ring_paths, 1, n_bound
+
+
+def _d6_compliant(stage, path, body0, body1, anchor0, anchor1,
+                  bend_limit_deg, stiffness, damping, twist_scale=0.5):
+    """D6 that locks translation and lets the joint bend against a soft drive.
+
+    Translation is a hard lock, not a stiff spring: the hoops of a real duct are
+    sewn into inextensible fabric, and modelling that as a spring is what makes
+    the chain bounce like a slinky. Bending is a limited rotation with a drive
+    pulling back to straight -- that drive IS the compliance.
+    """
+    j = UsdPhysics.Joint.Define(stage, path)
+    j.CreateBody0Rel().SetTargets([body0])
+    j.CreateBody1Rel().SetTargets([body1])
+    j.CreateLocalPos0Attr().Set(anchor0)
+    j.CreateLocalPos1Attr().Set(anchor1)
+    j.CreateLocalRot0Attr().Set(Gf.Quatf(1.0))
+    j.CreateLocalRot1Attr().Set(Gf.Quatf(1.0))
+    for axis in ("transX", "transY", "transZ"):
+        lim = UsdPhysics.LimitAPI.Apply(j.GetPrim(), axis)
+        lim.CreateLowAttr(0.0)
+        lim.CreateHighAttr(0.0)
+    for axis, deg in (("rotX", bend_limit_deg * twist_scale),
+                      ("rotY", bend_limit_deg),
+                      ("rotZ", bend_limit_deg)):
+        lim = UsdPhysics.LimitAPI.Apply(j.GetPrim(), axis)
+        lim.CreateLowAttr(float(-deg))
+        lim.CreateHighAttr(float(deg))
+    for axis in ("rotX", "rotY", "rotZ"):
+        drv = UsdPhysics.DriveAPI.Apply(j.GetPrim(), axis)
+        drv.CreateTypeAttr("force")
+        drv.CreateTargetPositionAttr(0.0)
+        drv.CreateStiffnessAttr(float(stiffness))
+        drv.CreateDampingAttr(float(damping))
+    return j
+
+
+def spawn_duct_rigid(
+    stage,
+    index: int,
+    stations,
+    spec,
+    z: float = 0.0,
+    disc_thickness: float = 0.006,
+    sleeve_inset: float = 0.006,
+    bend_limit_deg: float = 14.0,
+    stiffness: float = 8.0,
+    damping: float = 2.0,
+    density: float = 120.0,
+    ring_colour=(0.03, 0.03, 0.03),
+    cloth_colour=(0.95, 0.80, 0.10),
+    verbose: bool = True,
+):
+    """A duct made ONLY of rigid bodies: black discs and yellow sleeves, hinged.
+
+    No cloth at all. Each hoop becomes a thin black disc and each gap a yellow
+    cylinder, joined by D6s whose rotational drives give the compliance -- push
+    it and it bends, let go and it eases back.
+
+    The point is cost. The cloth was never the expensive part; the hoop
+    colliders were. A hoop built from 32 capsules is 32 convex shapes, and a
+    1,629-hoop track is ~52,000 of them, with the CPU at 386 % and the GPU
+    idling at 2-9 %. Here a hoop is ONE cylinder and a gap is one more, so the
+    same track is ~3,300 shapes: about 16x fewer.
+
+    What it gives up is real fabric. The cross-section stays circular, so it
+    cannot crumple, fold or drape -- a car hitting this finds a compliant tube,
+    not a bag. For a track barrier that may be the better model anyway, and it
+    is the difference between 7.6x real time and something usable.
+    """
+    R = spec.radius
+    root = f"/World/duct_{index:02d}"
+    UsdGeom.Xform.Define(stage, root)
+    if z <= 0.0:
+        z = R + disc_thickness + 0.05
+
+    def _place(prim, x, y, heading_deg):
+        xf = UsdGeom.Xformable(prim)
+        xf.AddTranslateOp().Set(Gf.Vec3d(float(x), float(y), float(z)))
+        q = (Gf.Rotation(Gf.Vec3d(0, 0, 1), float(heading_deg))
+             * Gf.Rotation(Gf.Vec3d(0, 1, 0), 90.0))
+        xf.AddOrientOp().Set(Gf.Quatf(q.GetQuat()))
+
+    bodies = []          # (path, kind)
+    for i, (x, y, h) in enumerate(stations):
+        d = UsdGeom.Cylinder.Define(stage, f"{root}/disc_{i:04d}")
+        d.CreateAxisAttr("Z")
+        d.CreateRadiusAttr(float(R))
+        d.CreateHeightAttr(float(disc_thickness))
+        d.CreateDisplayColorAttr().Set([Gf.Vec3f(*ring_colour)])
+        _place(d.GetPrim(), x, y, h)
+        UsdPhysics.CollisionAPI.Apply(d.GetPrim())
+        UsdPhysics.RigidBodyAPI.Apply(d.GetPrim())
+        UsdPhysics.MassAPI.Apply(d.GetPrim()).CreateDensityAttr(density)
+        bodies.append((f"{root}/disc_{i:04d}", "disc"))
+
+        if i < len(stations) - 1:
+            x1, y1, h1 = stations[i + 1]
+            gap = math.hypot(x1 - x, y1 - y)
+            length = max(1e-3, gap - disc_thickness)
+            dh = ((h1 - h + 180.0) % 360.0) - 180.0
+            s = UsdGeom.Cylinder.Define(stage, f"{root}/sleeve_{i:04d}")
+            s.CreateAxisAttr("Z")
+            s.CreateRadiusAttr(float(R - sleeve_inset))
+            s.CreateHeightAttr(float(length))
+            s.CreateDisplayColorAttr().Set([Gf.Vec3f(*cloth_colour)])
+            _place(s.GetPrim(), (x + x1) * 0.5, (y + y1) * 0.5, h + dh * 0.5)
+            UsdPhysics.CollisionAPI.Apply(s.GetPrim())
+            UsdPhysics.RigidBodyAPI.Apply(s.GetPrim())
+            UsdPhysics.MassAPI.Apply(s.GetPrim()).CreateDensityAttr(density)
+            bodies.append((f"{root}/sleeve_{i:04d}", "sleeve"))
+
+    # hinge consecutive bodies at the face they share. Local +Z runs along the
+    # duct for every body, because _place maps local Z onto the heading.
+    n_joints = 0
+    for k in range(len(bodies) - 1):
+        p0, kind0 = bodies[k]
+        p1, _ = bodies[k + 1]
+        h0 = (disc_thickness if kind0 == "disc"
+              else float(stage.GetPrimAtPath(p0).GetAttribute("height").Get()))
+        h1 = float(stage.GetPrimAtPath(p1).GetAttribute("height").Get())
+        _d6_compliant(stage, f"{p0}/joint", p0, p1,
+                      Gf.Vec3f(0, 0, float(h0) * 0.5),
+                      Gf.Vec3f(0, 0, float(-h1) * 0.5),
+                      bend_limit_deg, stiffness, damping)
+        n_joints += 1
+
+    if verbose:
+        print(f"[duct {index:02d}] RIGID: {len(stations)} discs + "
+              f"{len(bodies) - len(stations)} sleeves = {len(bodies)} bodies, "
+              f"{len(bodies)} collision shapes, {n_joints} joints "
+              f"(vs ~{len(stations) * spec.ring_segments} shapes for the cloth "
+              f"build)", flush=True)
+    return root, [b for b, _ in bodies], len(bodies), n_joints
