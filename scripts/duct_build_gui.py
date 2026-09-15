@@ -46,6 +46,11 @@ ap.add_argument("--layout", default="",
                 help="track JSON exported from the planner: builds one duct "
                      "per drawn run, following the centreline")
 ap.add_argument("--ground", type=float, default=40.0, help="ground plane size [m]")
+ap.add_argument("--perf-every", type=int, default=0,
+                help="print ms/step and GPU memory every N steps")
+ap.add_argument("--frame", action="store_true",
+                help="aim the viewport at the whole arena")
+ap.add_argument("--cam-dist", type=float, default=0.0)
 ap.add_argument("--stretch", type=float, default=2.0e4)
 ap.add_argument("--shear", type=float, default=2.0)
 ap.add_argument("--bend", type=float, default=1.0e-3)
@@ -447,9 +452,68 @@ else:
     for _ in range(int(args.spawn_on_start)):
         do_spawn(args.length)
 
+if args.frame:
+    # SetLookAt builds the WORLD-to-camera matrix, so the camera transform is
+    # its inverse. Lens is authored explicitly: UsdGeom.Camera defaults to
+    # 50 mm, and assuming 28 once put the subject 2.3x too close.
+    _W, _D = 30.0, 20.0
+    if args.layout:
+        try:
+            import json as _json
+            _a = _json.load(open(args.layout)).get("arena", {})
+            _W = float(_a.get("width", _W)); _D = float(_a.get("depth", _D))
+        except Exception:
+            pass
+    FOCAL, HAP = 20.0, 36.0
+    VAP = HAP / (820.0 / 460.0)
+    _cam = UsdGeom.Camera.Define(stage, "/World/cam")
+    _cam.CreateFocalLengthAttr(FOCAL)
+    _cam.CreateHorizontalApertureAttr(HAP)
+    _cam.CreateVerticalApertureAttr(VAP)
+    _tgt = Gf.Vec3d(0, 0, 0.3)
+    _hf = 2.0 * math.atan(HAP * 0.5 / FOCAL)
+    _vf = 2.0 * math.atan(VAP * 0.5 / FOCAL)
+    _dist = args.cam_dist or max((_W * 1.12) * 0.5 / math.tan(_hf * 0.5),
+                                 (_D * 1.12) * 0.5 / math.tan(_vf * 0.5))
+    _eye = _tgt + Gf.Vec3d(0.02, -0.62, 0.78).GetNormalized() * _dist
+    _xf = UsdGeom.Xformable(_cam)
+    _xf.ClearXformOpOrder()
+    _xf.AddTransformOp().Set(
+        Gf.Matrix4d().SetLookAt(_eye, _tgt, Gf.Vec3d(0, 0, 1)).GetInverse())
+    try:
+        from omni.kit.viewport.utility import get_active_viewport
+        get_active_viewport().camera_path = "/World/cam"
+        print(f"[build] camera {_dist:.1f} m back, framing {_W} x {_D} m",
+              flush=True)
+    except Exception as exc:
+        print(f"[build] viewport retarget failed: {exc}", flush=True)
+
 print(f"[build] running. N/panel = spawn, SHIFT+drag = place, "
       f"R = bake, S = save -> {args.out}", flush=True)
 
+def _gpu_mb():
+    """Resident GPU memory for this process, or -1. nvidia-smi is the only
+    source that sees the renderer as well as the solver."""
+    try:
+        import subprocess
+        out = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=pid,used_memory",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=4).stdout
+        mine = str(os.getpid())
+        for line in out.splitlines():
+            pid, mb = [t.strip() for t in line.split(",")[:2]]
+            if pid == mine:
+                return int(mb)
+    except Exception:
+        pass
+    return -1
+
+
+import time  # noqa: E402
+
+_t0 = time.perf_counter()
+_acc = 0.0
 step = 0
 while app.is_running():
     if state["pending_spawn"]:
@@ -516,7 +580,14 @@ while app.is_running():
         except Exception as exc:
             print(f"[build] drag error: {exc}", flush=True)
             state["dragger"] = None
+    _a = time.perf_counter()
     sim.step(render=True)
+    _acc += time.perf_counter() - _a
     step += 1
+    if args.perf_every and step % args.perf_every == 0:
+        _mb = _gpu_mb()
+        print(f"[perf] {step:6d} steps  {_acc / step * 1e3:6.1f} ms/step  "
+              f"{step / (time.perf_counter() - _t0):5.1f} fps  "
+              f"GPU {_mb} MiB", flush=True)
 
 app.close()
