@@ -178,6 +178,28 @@ meets a compliant tube rather than a bag. For a track barrier that is arguably
 the better model, and it is the difference between watching a replay and
 running one.
 
+**Set mass, never density.** The sleeve body is a *solid* cylinder while a duct
+is a thin-walled tube, so a plausible-looking density made a 6 m duct weigh
+**139 kg** — 47× a real 400 mm duct's ~0.5 kg/m. Hundreds of overweight links on
+compliant joints heave around like a worm, and no amount of joint tuning fixes
+it. `--mass-per-m` sets it directly.
+
+The joint parameters are swept, not guessed. `scripts/test_wobble.py` scores
+residual body speed after settling, and the vertical waviness of a duct lying
+flat:
+
+| stiffness | damping | body damping | bend limit | residual m/s | waviness |
+|---|---|---|---|---|---|
+| 8 | 2 | 0.5 | 14° | 0.0457 | 0.060 |
+| 50 | 10 | 2.0 | 10° | 0.0245 | 0.043 |
+| **200** | **20** | **1.0** | **10°** | **0.0034** | **0.001** |
+| 200 | 40 | 2.0 | 8° | 0.0309 | 0.057 |
+| 600 | 60 | 2.0 | 8° | 0.0083 | 0.008 |
+
+The chosen row heaves 13× less than the first guess. Note the fourth row: more
+damping, nine times *worse*. Not monotonic, and not explained — the 8° limit may
+be chattering, but that is a guess, and the row was simply not chosen.
+
 ---
 
 ## Layout

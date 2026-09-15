@@ -680,6 +680,35 @@ def spawn_duct_path(
     return root, ring_paths, 1, n_bound
 
 
+def _set_mass(prim, mass, density):
+    api = UsdPhysics.MassAPI.Apply(prim)
+    if mass > 0:
+        api.CreateMassAttr(float(mass))
+    else:
+        api.CreateDensityAttr(float(density))
+
+
+def _stabilise(prim, damping, pos_iters, vel_iters, sleep_threshold):
+    """Settle a long hinged chain instead of letting it buzz.
+
+    Hundreds of bodies joined by locked-translation D6s is a stiff system: with
+    the default iteration count the solver cannot satisfy every constraint in a
+    step, and the residual shows up as a permanent shiver that never dies down.
+    More iterations, a little body damping, and a sleep threshold so a settled
+    duct actually stops being integrated.
+    """
+    prim.ApplyAPI("PhysxRigidBodyAPI")
+    for name, val in (("physxRigidBody:solverPositionIterationCount", int(pos_iters)),
+                      ("physxRigidBody:solverVelocityIterationCount", int(vel_iters)),
+                      ("physxRigidBody:linearDamping", float(damping)),
+                      ("physxRigidBody:angularDamping", float(damping)),
+                      ("physxRigidBody:sleepThreshold", float(sleep_threshold)),
+                      ("physxRigidBody:stabilizationThreshold", float(sleep_threshold) * 0.2)):
+        a = prim.GetAttribute(name)
+        if a and a.IsValid():
+            a.Set(val)
+
+
 def _d6_compliant(stage, path, body0, body1, anchor0, anchor1,
                   bend_limit_deg, stiffness, damping, twist_scale=0.5):
     """D6 that locks translation and lets the joint bend against a soft drive.
@@ -723,10 +752,19 @@ def spawn_duct_rigid(
     z: float = 0.0,
     disc_thickness: float = 0.006,
     sleeve_inset: float = 0.006,
-    bend_limit_deg: float = 14.0,
-    stiffness: float = 8.0,
-    damping: float = 2.0,
-    density: float = 120.0,
+    # measured, not guessed: a sweep over (stiffness, damping, body damping,
+    # bend limit) scored residual body speed after settling. These gave
+    # 0.0034 m/s against 0.0457 for the first guess -- 13x less heaving -- and
+    # left the duct lying flat (0.001 m of vertical waviness against 0.060).
+    bend_limit_deg: float = 10.0,
+    stiffness: float = 200.0,
+    damping: float = 20.0,
+    density: float = 0.0,
+    mass_per_m: float = 0.5,
+    body_damping: float = 1.0,
+    solver_pos_iters: int = 32,
+    solver_vel_iters: int = 4,
+    sleep_threshold: float = 0.005,
     ring_colour=(0.03, 0.03, 0.03),
     cloth_colour=(0.95, 0.80, 0.10),
     verbose: bool = True,
@@ -754,6 +792,18 @@ def spawn_duct_rigid(
     if z <= 0.0:
         z = R + disc_thickness + 0.05
 
+    # SET MASS, DO NOT SET DENSITY. A duct is a thin-walled tube; the sleeve
+    # body is a SOLID cylinder, so a density that looks reasonable produces an
+    # absurd mass -- 195 kg/m3 gave 139 kg for a 6 m duct, about 47x a real
+    # 400 mm duct's ~0.5 kg/m. Hundreds of overweight links on compliant joints
+    # is exactly what makes the chain heave around like a worm.
+    total_len = 0.0
+    for i in range(len(stations) - 1):
+        total_len += math.hypot(stations[i + 1][0] - stations[i][0],
+                                stations[i + 1][1] - stations[i][1])
+    n_bodies_est = max(1, 2 * len(stations) - 1)
+    body_mass = (mass_per_m * total_len / n_bodies_est) if mass_per_m > 0 else 0.0
+
     def _place(prim, x, y, heading_deg):
         xf = UsdGeom.Xformable(prim)
         xf.AddTranslateOp().Set(Gf.Vec3d(float(x), float(y), float(z)))
@@ -771,7 +821,9 @@ def spawn_duct_rigid(
         _place(d.GetPrim(), x, y, h)
         UsdPhysics.CollisionAPI.Apply(d.GetPrim())
         UsdPhysics.RigidBodyAPI.Apply(d.GetPrim())
-        UsdPhysics.MassAPI.Apply(d.GetPrim()).CreateDensityAttr(density)
+        _set_mass(d.GetPrim(), body_mass, density)
+        _stabilise(d.GetPrim(), body_damping, solver_pos_iters,
+                   solver_vel_iters, sleep_threshold)
         bodies.append((f"{root}/disc_{i:04d}", "disc"))
 
         if i < len(stations) - 1:
@@ -787,7 +839,9 @@ def spawn_duct_rigid(
             _place(s.GetPrim(), (x + x1) * 0.5, (y + y1) * 0.5, h + dh * 0.5)
             UsdPhysics.CollisionAPI.Apply(s.GetPrim())
             UsdPhysics.RigidBodyAPI.Apply(s.GetPrim())
-            UsdPhysics.MassAPI.Apply(s.GetPrim()).CreateDensityAttr(density)
+            _set_mass(s.GetPrim(), body_mass, density)
+            _stabilise(s.GetPrim(), body_damping, solver_pos_iters,
+                       solver_vel_iters, sleep_threshold)
             bodies.append((f"{root}/sleeve_{i:04d}", "sleeve"))
 
     # hinge consecutive bodies at the face they share. Local +Z runs along the
@@ -806,6 +860,9 @@ def spawn_duct_rigid(
         n_joints += 1
 
     if verbose:
+        print(f"[duct {index:02d}] mass {mass_per_m} kg/m over {total_len:.2f} m "
+              f"= {mass_per_m * total_len:.2f} kg total, "
+              f"{body_mass * 1000:.1f} g per body", flush=True)
         print(f"[duct {index:02d}] RIGID: {len(stations)} discs + "
               f"{len(bodies) - len(stations)} sleeves = {len(bodies)} bodies, "
               f"{len(bodies)} collision shapes, {n_joints} joints "

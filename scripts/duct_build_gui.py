@@ -50,11 +50,19 @@ ap.add_argument("--rigid", action="store_true",
                 help="build the duct from black discs and yellow sleeves hinged "
                      "by compliant joints, with no cloth at all. ~16x fewer "
                      "collision shapes; cannot crumple or drape.")
-ap.add_argument("--bend-limit", type=float, default=14.0,
+ap.add_argument("--bend-limit", type=float, default=10.0,
                 help="--rigid: bend allowed per joint [deg]")
-ap.add_argument("--stiffness", type=float, default=8.0,
+ap.add_argument("--stiffness", type=float, default=200.0,
                 help="--rigid: joint drive stiffness (the compliance)")
-ap.add_argument("--damping", type=float, default=2.0)
+ap.add_argument("--damping", type=float, default=20.0)
+ap.add_argument("--mass-per-m", type=float, default=0.5,
+                help="--rigid: duct mass per metre [kg]. A real 400 mm flexible "
+                     "duct is ~0.5; setting a density instead made it 23 kg/m.")
+ap.add_argument("--body-damping", type=float, default=1.0,
+                help="--rigid: linear/angular damping on each body; raise it if "
+                     "the chain shivers instead of settling")
+ap.add_argument("--solver-iters", type=int, default=32,
+                help="--rigid: position iterations per body")
 ap.add_argument("--posts", action="store_true",
                 help="also build the planner's posts as static colliders. Off "
                      "by default: they shape the layout in 2-D and the drawn "
@@ -245,7 +253,9 @@ def _next_index():
 def _refresh_dragger():
     """Rebuild the drag target list so newly spawned ducts are grabbable too."""
     rings = sorted(str(p.GetPath()) for p in stage.Traverse()
-                   if p.GetName().startswith("ring_")
+                   # --rigid names its bodies disc_/sleeve_, not ring_; without
+                   # this the dragger finds nothing to grab in a rigid scene
+                   if p.GetName().startswith(("ring_", "disc_", "sleeve_"))
                    and p.HasAPI(UsdPhysics.RigidBodyAPI))
     state["rings"] = rings
     if not rings:
@@ -271,6 +281,20 @@ def _do_spawn_now(length_m):
     idx = _next_index()
     # stagger new ducts sideways so they do not land inside an existing one
     origin = (0.0, idx * 0.9, args.height)
+    if args.rigid:
+        # a straight line of stations: the path builder's special case
+        n = max(2, int(round(length_m / args.spacing)) + 1)
+        st = [(-length_m / 2 + args.spacing * k, origin[1], 0.0)
+              for k in range(n)]
+        spawn_duct_rigid(stage, idx, st, spec,
+                         bend_limit_deg=args.bend_limit,
+                         stiffness=args.stiffness, damping=args.damping,
+                         mass_per_m=args.mass_per_m,
+                         body_damping=args.body_damping,
+                         solver_pos_iters=args.solver_iters)
+        state["n_ducts"] = idx + 1
+        _refresh_dragger()
+        return
     try:
         fn = spawn_duct if args.segmented else spawn_duct_single
         kw = ({} if args.segmented
@@ -459,7 +483,9 @@ if args.layout:
             spawn_duct_rigid(stage, _i, _st, spec,
                              bend_limit_deg=args.bend_limit,
                              stiffness=args.stiffness, damping=args.damping,
-                             density=spec.ring_density / 40.0)
+                             mass_per_m=args.mass_per_m,
+                             body_damping=args.body_damping,
+                             solver_pos_iters=args.solver_iters)
             state["n_ducts"] = _i + 1
             continue
         spawn_duct_path(
