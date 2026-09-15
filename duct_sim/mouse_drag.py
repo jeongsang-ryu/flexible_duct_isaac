@@ -70,6 +70,8 @@ class HoopDragger:
         self._pick_pending = False
         self._target = None        # world-space goal, moved by mouse DELTAS
         self._last_mouse = None
+        self._saw_shift = False
+        self._saw_mouse = False
 
     # -- lazily build the view: RigidPrim allocates GPU tensors, so do it after play
     def _ensure_view(self):
@@ -79,12 +81,27 @@ class HoopDragger:
         return self._view
 
     def _shift_down(self):
-        return (self._input.get_keyboard_value(self._kb, carb.input.KeyboardInput.LEFT_SHIFT)
-                or self._input.get_keyboard_value(self._kb, carb.input.KeyboardInput.RIGHT_SHIFT))
+        for dev in (self._kb, None):
+            try:
+                if (self._input.get_keyboard_value(dev, carb.input.KeyboardInput.LEFT_SHIFT)
+                        or self._input.get_keyboard_value(dev, carb.input.KeyboardInput.RIGHT_SHIFT)):
+                    return True
+            except Exception:
+                continue
+        return False
 
     def _mouse_down(self):
-        return bool(self._input.get_mouse_value(
-            self._mouse, carb.input.MouseInput.LEFT_BUTTON))
+        # PASS None, NOT THE MOUSE HANDLE. Kit's own code polls
+        # get_mouse_value(None, ...) and querying with the app window's mouse
+        # object returned 0 forever here -- the gesture was never detected, no
+        # error, nothing in the log. The handle form is kept as a fallback.
+        for dev in (None, self._mouse):
+            try:
+                if self._input.get_mouse_value(dev, carb.input.MouseInput.LEFT_BUTTON):
+                    return True
+            except Exception:
+                continue
+        return False
 
     # ---- exact pick: ask the viewport what is under the cursor ----
     # Computing a world ray from carb's mouse coords is off by a constant,
@@ -202,7 +219,16 @@ class HoopDragger:
 
     def update(self):
         """Call once per simulation step, before sim.step()."""
-        down = self._shift_down() and self._mouse_down()
+        shift, mouse = self._shift_down(), self._mouse_down()
+        # say so the FIRST time each is seen, so "nothing happens" can be told
+        # apart from "shift was read but the click was not"
+        if shift and not self._saw_shift:
+            self._saw_shift = True
+            print("[drag] shift detected", flush=True)
+        if mouse and not self._saw_mouse:
+            self._saw_mouse = True
+            print("[drag] left button detected", flush=True)
+        down = shift and mouse
 
         if down and self._held is None:
             # ALWAYS take the ray pick, immediately. The previous version tried

@@ -55,8 +55,19 @@ ap.add_argument("--pusher", type=float, default=0.0,
                 help="drop a draggable ball of this radius [m] to prod the duct "
                      "with. Needed for --fem and --static, which have no rigid "
                      "bodies for SHIFT+drag to grab. 0 = auto.")
-ap.add_argument("--fem-youngs", type=float, default=5.0e5,
+ap.add_argument("--pusher-mass", type=float, default=8.0,
+                help="mass of the pusher ball [kg]; it has to outweigh the duct "
+                     "to shove it, the way a car does")
+ap.add_argument("--fem-youngs", type=float, default=8.0e3,
                 help="--fem: stiffness of the material [Pa]; lower = softer")
+ap.add_argument("--fem-poisson", type=float, default=0.15,
+                help="--fem: Poisson's ratio. THE BIG LEVER for a solid body "
+                     "standing in for a hollow tube: near 0.5 the material is "
+                     "incompressible and physically cannot squash, however low "
+                     "the modulus. Low values let it give way.")
+ap.add_argument("--fem-damping", type=float, default=0.5,
+                help="--fem: elasticity damping; raise it to stop the body "
+                     "springing back like rubber")
 ap.add_argument("--rigid", action="store_true",
                 help="build the duct from black discs and yellow sleeves hinged "
                      "by compliant joints, with no cloth at all. ~16x fewer "
@@ -223,10 +234,29 @@ if not args.load:
 
 FEM_MAT = "/World/fem_material"
 if args.fem and not stage.GetPrimAtPath(FEM_MAT):
+    # DERIVE THE DENSITY FROM THE TARGET MASS. The FEM body is a SOLID cylinder
+    # standing in for a hollow duct, so a density that sounds reasonable is
+    # wildly wrong: 120 kg/m3 over pi*0.2^2*6 m makes a 6 m duct weigh 90 kg --
+    # 15 kg/m against a real duct's ~0.5, and 45x the 2 kg ball meant to shove
+    # it. Same trap as setting a density on the rigid sleeves; solid volumes
+    # standing in for thin walls must have their mass set, not their density.
+    _vol = math.pi * spec.radius ** 2 * args.length
+    _fem_density = max(0.5, args.mass_per_m * args.length / _vol)
     deformableUtils.add_deformable_material(
         stage, FEM_MAT, dynamic_friction=0.6,
-        youngs_modulus=args.fem_youngs, poissons_ratio=0.45, density=120.0)
-    print(f"[build] FEM material: youngs {args.fem_youngs:.3g} Pa", flush=True)
+        youngs_modulus=args.fem_youngs, poissons_ratio=args.fem_poisson,
+        density=_fem_density)
+    # damping lives on the PhysX side of the material, not the USD physics one
+    _fm = stage.GetPrimAtPath(FEM_MAT)
+    _fm.ApplyAPI("PhysxDeformableMaterialAPI")
+    _da = _fm.GetAttribute("physxDeformableMaterial:elasticityDamping")
+    if _da and _da.IsValid():
+        _da.Set(float(args.fem_damping))
+    print(f"[build] FEM material: youngs {args.fem_youngs:.3g} Pa, "
+          f"poisson {args.fem_poisson}, damping {args.fem_damping}, "
+          f"density {_fem_density:.2f} kg/m3 -> "
+          f"{args.mass_per_m * args.length:.1f} kg for {args.length} m",
+          flush=True)
 
 MAT = "/World/cloth_material"
 if not stage.GetPrimAtPath(MAT):
@@ -287,8 +317,9 @@ def _make_pusher(radius):
         Gf.Vec3d(0.0, -spec.radius * 4.0, radius))
     UsdPhysics.CollisionAPI.Apply(b.GetPrim())
     UsdPhysics.RigidBodyAPI.Apply(b.GetPrim())
-    UsdPhysics.MassAPI.Apply(b.GetPrim()).CreateMassAttr(2.0)
-    print(f"[build] pusher ball r={radius} m — SHIFT+drag it into the duct",
+    UsdPhysics.MassAPI.Apply(b.GetPrim()).CreateMassAttr(float(args.pusher_mass))
+    print(f"[build] pusher ball r={radius:.2f} m, {args.pusher_mass} kg "
+          f"— SHIFT+drag it into the duct",
           flush=True)
     return path
 
