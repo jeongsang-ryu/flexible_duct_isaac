@@ -76,10 +76,14 @@ def create_seam(stage, seam_path, cloth_path, rigid_path,
              float(filtering_offset) if enable_filtering else 0.0),
             ("physxAutoDeformableAttachment:deformableVertexOverlapOffset", float(overlap_offset)),
             ("physxAutoDeformableAttachment:enableDeformableVertexAttachments", True),
-            # Sampling points on the RIGID surface is what lets a hoop pull the
-            # fabric out to its own radius instead of merely holding it where
-            # it was drawn. With the fabric authored smaller than the hoop, this
-            # is what makes it go taut on play rather than hang slack.
+            # MEASURED: THIS DOES NOT PULL THE FABRIC. Sampling points on the
+            # rigid surface adds attachment points, but each one still targets
+            # wherever the fabric already was -- localPositionsSrc1 records the
+            # offset at creation. Fabric drawn 50 mm inside the hoops measured
+            # 146.0 mm at the hoop with this off AND with it on, identical to
+            # the decimal. An attachment cannot express "constrain as if these
+            # were touching"; it always preserves the existing gap. Kept only so
+            # the negative result is reproducible -- see scripts/test_taut.py.
             ("physxAutoDeformableAttachment:enableRigidSurfaceAttachments",
              bool(rigid_surface)),
             ("physxAutoDeformableAttachment:rigidSurfaceSamplingDistance",
@@ -548,7 +552,7 @@ def spawn_duct_path(
     rib_inset: float = 0.0015,
     smooth_render: bool = True,
     speculative_ccd: bool = True,
-    taut: bool = False,
+    taut: bool = False,             # measured to have no effect; see create_seam
     surface_sampling: float = 0.02,
     ring_colour=(0.03, 0.03, 0.03),
     cloth_colour=(0.95, 0.80, 0.10),

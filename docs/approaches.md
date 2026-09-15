@@ -131,6 +131,26 @@ python scripts/duct_build_gui.py --static   # swept tube, nothing moves
 `--fem-youngs` sets how soft the continuum is (1e5 rubbery, 1e6 firm);
 `--stiffness` / `--damping` / `--mass-per-m` tune the chain.
 
+## What a seam cannot do
+
+A seam holds cloth vertices at a **position recorded in the hoop's frame**
+(`localPositionsSrc1`), captured when the attachment is built. That makes one
+tempting idea impossible: drawing the fabric smaller than the hoops and
+constraining it "as if it were touching", so it snaps taut on play.
+
+Measured, fabric authored 50 mm inside the hoops:
+
+| `enableRigidSurfaceAttachments` | fabric radius at the hoop |
+|---|---|
+| off | 146.0 mm |
+| on | 146.0 mm |
+
+Identical to the decimal — the hoop radius was 196.0 mm. Sampling points on the
+rigid surface adds more attachment points; every one of them still targets where
+the fabric already was. An attachment preserves the gap it was built with, so
+tension has to come from somewhere else — shrinking the fabric's **rest** shape
+rather than pulling its current one.
+
 ## Which surface a sensor sees — still unanswered
 
 Whether a lidar returns the *simulated* duct or the *authored* one is the one

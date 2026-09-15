@@ -66,10 +66,11 @@ ap.add_argument("--fem-poisson", type=float, default=0.15,
                      "incompressible and physically cannot squash, however low "
                      "the modulus. Low values let it give way.")
 ap.add_argument("--taut", action="store_true",
-                help="cloth build: draw the fabric well INSIDE the hoops and "
-                     "let the hoop surfaces pull it out, so it goes tight on "
-                     "play instead of hanging slack. Use with a large negative "
-                     "--clearance.")
+                help="MEASURED TO DO NOTHING. Was meant to let hoop surfaces "
+                     "pull fabric drawn inside them outwards; attachments "
+                     "always preserve the gap they were built with, so the "
+                     "fabric does not move. Kept so the result stays "
+                     "reproducible (scripts/test_taut.py).")
 ap.add_argument("--surface-sampling", type=float, default=0.02,
                 help="--taut: spacing of attachment points sampled on the hoop")
 ap.add_argument("--fem-rings", type=float, default=0.0,
