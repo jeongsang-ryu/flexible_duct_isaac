@@ -138,6 +138,28 @@ mesh has nowhere to fold, so it is artificially stiff. Single measurement.
 The cloth is almost free; Isaac is not — 38 sleeves versus 1 cost **2 MiB** and
 +11 % step time, against 7.2 GB resident for the renderer and framework.
 
+### A whole track
+
+A 30 × 20 m layout: 9 ducts, 81 m, **1,629 hoops**, ~52,000 collision shapes.
+Every seam bound, no `allocDeviceBuffer` failures.
+
+| | |
+|---|---|
+| build (cooking) | ~25 min, 3.5 GB |
+| simulating | 8.7 GB total → **~1.5 GB for the track** |
+| first 300 steps | **253 s** — PhysX claiming GPU buffers |
+| steady state | **63.5 ms/step, 15.7 fps** — 7.6× real time, with rendering |
+
+**Read the marginal cost, not the running average.** The cumulative figure
+still said 842 ms/step at step 300 and 140 ms at step 3,600, because the 253 s
+of start-up never leaves the average. Quoting it as the speed made the track
+look 101× slower than real time when the honest number is 7.6×, and that
+difference is the whole answer to whether it can be used for RL.
+
+The bottleneck is the hoop colliders, not the cloth: CPU sat at 386 % while the
+GPU idled at 2–9 %. Halving the hoop spacing and the capsule count is worth
+~4× and is untried.
+
 ---
 
 ## Layout
