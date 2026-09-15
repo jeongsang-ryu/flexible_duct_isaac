@@ -3,5 +3,4 @@ __pycache__/
 layouts/*.usd
 layouts/*.usda
 *.mp4
-*.png
 *.log

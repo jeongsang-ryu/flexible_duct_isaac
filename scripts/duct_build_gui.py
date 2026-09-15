@@ -404,22 +404,34 @@ except Exception as exc:
 
 if args.layout:
     # a drawn layout replaces the default straight spawn entirely
-    from duct_sim.layout import anchor_stations, describe, load, resample
+    from duct_sim.layout import describe, load, posts, resample
 
     _doc = load(args.layout)
     _sp = float(_doc.get("duct", {}).get("hoop_spacing", args.spacing))
     print(f"[build] layout {args.layout}", flush=True)
     print(describe(_doc), flush=True)
+
+    # posts first: they are static colliders the ducts settle against, the same
+    # obstacles they were routed around in the planner
+    for _pi, (_px, _py, _pr) in enumerate(posts(_doc)):
+        _pp = f"/World/post_{_pi:02d}"
+        _cyl = UsdGeom.Cylinder.Define(stage, _pp)
+        _cyl.CreateAxisAttr("Z")
+        _cyl.CreateRadiusAttr(float(_pr))
+        _cyl.CreateHeightAttr(0.8)
+        _cyl.CreateDisplayColorAttr().Set([Gf.Vec3f(0.70, 0.25, 0.17)])
+        UsdGeom.Xformable(_cyl).AddTranslateOp().Set(Gf.Vec3d(_px, _py, 0.4))
+        UsdPhysics.CollisionAPI.Apply(_cyl.GetPrim())
+    _np_posts = len(posts(_doc))
+    if _np_posts:
+        print(f"[build] {_np_posts} static post(s) placed", flush=True)
     for _i, _run in enumerate(_doc["runs"]):
         _st = resample(_run.get("points", []), _sp)
         if len(_st) < 2:
             print(f"[build] run {_i} has too few points; skipped", flush=True)
             continue
-        _anc = anchor_stations(_run.get("points", []), _run.get("anchors", []), _sp)
-        if _anc:
-            print(f"[build] run {_i}: anchors at hoops {_anc}", flush=True)
         spawn_duct_path(
-            stage, _i, _st, spec, MAT, anchor_stations=_anc,
+            stage, _i, _st, spec, MAT,
             n_circ=args.n_circ, clearance=args.clearance,
             self_collision=args.self_collision,
             self_collision_distance=args.self_collision_distance,

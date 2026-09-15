@@ -115,12 +115,18 @@ code{font:11.5px ui-monospace,Menlo,monospace; background:var(--field);
     </div>
 
     <div class="grp">
+      <h2>Posts</h2>
+      <div class="row"><label for="ar">Radius — m</label><input id="ar" type="number" value="0.25" min="0.05" max="3" step="0.05"></div>
+      <p class="note"><b>Shift-click</b> the floor to drop a post, shift-click a post to remove it. Drag a post and the ducts give way around it.</p>
+      <button id="clearAnchors">Clear all posts</button>
+    </div>
+
+    <div class="grp">
       <h2>Ducts</h2>
       <div class="runs" id="runs"></div>
       <div class="btns">
-        <button id="clearAnchors">Clear anchors</button>
         <button id="delRun" class="danger">Delete duct</button>
-        <button id="undo" class="wide">Undo</button>
+        <button id="undo">Undo</button>
       </div>
     </div>
 
@@ -139,15 +145,16 @@ code{font:11.5px ui-monospace,Menlo,monospace; background:var(--field);
   <main class="stage">
     <canvas id="cv"></canvas>
     <div class="hint">
-      <b>Drag</b> anywhere on a duct — the rest follows like a worm, keeping its
-      length. <b>Shift-click</b> a node to anchor it; anchored nodes stay put
-      while the body moves around them.
+      <b>Drag</b> anywhere on a duct — the rest follows like a worm and the
+      length never changes. <b>Shift-click</b> the floor to drop a post; ducts
+      route around posts instead of through them.
     </div>
     <div class="status">
       <div class="stat"><b>CURSOR</b><span id="sCur">—</span></div>
       <div class="stat"><b>DUCT</b><span id="sRun">—</span></div>
       <div class="stat"><b>TOTAL</b><span id="sTot">—</span></div>
       <div class="stat"><b>HOOPS</b><span id="sHoop">—</span></div>
+      <div class="stat"><b>POSTS</b><span id="sAnc">—</span></div>
       <div class="stat grow" id="sNote">&nbsp;</div>
     </div>
   </main>
@@ -164,11 +171,13 @@ const S={
   duct:{dia:0.40, spacing:0.05},
   snap:false,
   runs:[], active:-1,
-  hover:null, drag:null, cursor:null,
+  anchors:[],                 // posts on the floor the duct has to go around
+  anchorR:0.25,
+  hover:null, drag:null, dragAnchor:-1, cursor:null,
   hist:[]
 };
 
-function snap(){ S.hist.push(JSON.stringify(S.runs)); if(S.hist.length>60) S.hist.shift(); }
+function snap(){ S.hist.push(JSON.stringify({r:S.runs,a:S.anchors})); if(S.hist.length>60) S.hist.shift(); }
 const snapM=v=>S.snap?Math.round(v*4)/4:Math.round(v*1000)/1000;
 
 // ---- model -------------------------------------------------------------
@@ -180,32 +189,51 @@ function makeDuct(lengthM, nodeSpacing, cx, cy){
   const seg = lengthM/(n-1);
   const pts = [];
   for(let i=0;i<n;i++) pts.push([cx - lengthM/2 + seg*i, cy]);
-  return {name:"duct "+(S.runs.length+1), seg, pts, anchors:[]};
+  return {name:"duct "+(S.runs.length+1), seg, pts};
 }
-const isAnchor=(r,i)=>r.anchors.indexOf(i)>=0;
 
 function chainLength(r){ return r.seg*(r.pts.length-1); }
 
-// Jakobsen relaxation: repeatedly pull each pair back to the rest length.
-// Held nodes (the one under the cursor, plus any anchors) do not move, so the
-// rest of the body flows around them -- the worm behaviour.
+// Jakobsen relaxation: pull every pair back to the rest length so the duct can
+// be repositioned but never stretched. Between passes, any node that has ended
+// up inside a post is pushed back out to its edge -- which is what makes the
+// body wrap AROUND an obstacle instead of through it, the way a rope laid round
+// a peg does. The posts are fixed points in the world; the duct is what moves.
+function pushOutOfAnchors(pts, held){
+  for(let i=0;i<pts.length;i++){
+    if(i===held) continue;
+    for(const a of S.anchors){
+      let dx=pts[i][0]-a.x, dy=pts[i][1]-a.y;
+      let d=Math.hypot(dx,dy);
+      const R=a.r;
+      if(d<R){
+        if(d<1e-9){ dx=1; dy=0; d=1; }
+        pts[i][0]=a.x+dx/d*R;
+        pts[i][1]=a.y+dy/d*R;
+      }
+    }
+  }
+}
+
 function relax(r, held){
   const L=r.seg, pts=r.pts;
-  const fixed=i => i===held || isAnchor(r,i);
-  for(let it=0; it<40; it++){
+  for(let it=0; it<60; it++){
     for(let i=0;i<pts.length-1;i++){
       const a=pts[i], b=pts[i+1];
       let dx=b[0]-a[0], dy=b[1]-a[1];
       let d=Math.hypot(dx,dy);
       if(d<1e-9){ dx=1e-6; dy=0; d=1e-6; }
       const corr=(d-L)/d;
-      const wa=fixed(i)?0:1, wb=fixed(i+1)?0:1;
+      const wa=(i===held)?0:1, wb=(i+1===held)?0:1;
       const tot=wa+wb; if(!tot) continue;
       if(wa){ a[0]+=dx*corr*(wa/tot); a[1]+=dy*corr*(wa/tot); }
       if(wb){ b[0]-=dx*corr*(wb/tot); b[1]-=dy*corr*(wb/tot); }
     }
+    pushOutOfAnchors(pts, held);
   }
 }
+
+function relaxAll(){ S.runs.forEach(r=>relax(r,-1)); }
 
 // ---- view --------------------------------------------------------------
 let V={s:20,ox:0,oy:0};
@@ -289,19 +317,20 @@ function draw(){
     pts.forEach((p,pi)=>{
       const q=toPx(p[0],p[1]);
       const hot=S.hover&&S.hover.run===ri&&S.hover.idx===pi;
-      const anc=isAnchor(r,pi);
-      if(anc){
-        ctx.fillStyle=C.anc;
-        ctx.beginPath(); ctx.arc(q[0],q[1],5.5,0,7); ctx.fill();
-        ctx.strokeStyle=C.paper; ctx.lineWidth=1.6; ctx.stroke();
-        ctx.strokeStyle=C.anc; ctx.lineWidth=1.4;
-        ctx.beginPath(); ctx.arc(q[0],q[1],9,0,7); ctx.stroke();
-      }else{
-        ctx.beginPath(); ctx.arc(q[0],q[1],hot?5:3.2,0,7);
-        ctx.fillStyle=hot?C.meas:(act?C.ink:C.soft); ctx.fill();
-        if(hot){ctx.strokeStyle=C.paper; ctx.lineWidth=1.5; ctx.stroke();}
-      }
+      ctx.beginPath(); ctx.arc(q[0],q[1],hot?5:3.2,0,7);
+      ctx.fillStyle=hot?C.meas:(act?C.ink:C.soft); ctx.fill();
+      if(hot){ctx.strokeStyle=C.paper; ctx.lineWidth=1.5; ctx.stroke();}
     });
+  });
+
+  // posts, drawn last so they read as sitting on top of the floor
+  S.anchors.forEach((a,ai)=>{
+    const q=toPx(a.x,a.y), rp=Math.max(3,a.r*V.s);
+    const hot=S.hoverAnchor===ai;
+    ctx.beginPath(); ctx.arc(q[0],q[1],rp,0,7);
+    ctx.fillStyle=C.anc; ctx.globalAlpha=hot?.42:.28; ctx.fill(); ctx.globalAlpha=1;
+    ctx.strokeStyle=C.anc; ctx.lineWidth=hot?2.2:1.6; ctx.stroke();
+    ctx.beginPath(); ctx.arc(q[0],q[1],2.4,0,7); ctx.fillStyle=C.anc; ctx.fill();
   });
 
   if(S.cursor){
@@ -311,6 +340,14 @@ function draw(){
     ctx.moveTo(q[0],q[1]-9); ctx.lineTo(q[0],q[1]+9); ctx.stroke();
     ctx.globalAlpha=1;
   }
+}
+
+function pickAnchor(mx,my){
+  for(let i=S.anchors.length-1;i>=0;i--){
+    const a=S.anchors[i], q=toPx(a.x,a.y);
+    if(Math.hypot(q[0]-mx,q[1]-my) <= Math.max(7,a.r*V.s)) return i;
+  }
+  return -1;
 }
 
 function pick(mx,my){
@@ -325,21 +362,34 @@ function pick(mx,my){
 cv.addEventListener("pointerdown",e=>{
   cv.setPointerCapture(e.pointerId);
   const rc=cv.getBoundingClientRect(), mx=e.clientX-rc.left, my=e.clientY-rc.top;
+  const m=toM(mx,my);
+  const ai=pickAnchor(mx,my);
+
+  if(e.shiftKey){
+    // shift toggles a post: on an existing one it removes it, on bare floor it
+    // drops a new one. Posts belong to the map, not to any duct.
+    snap();
+    if(ai>=0) S.anchors.splice(ai,1);
+    else S.anchors.push({x:snapM(m[0]), y:snapM(m[1]), r:S.anchorR});
+    relaxAll(); refresh(); return;
+  }
+  if(ai>=0){ snap(); S.dragAnchor=ai; refresh(); return; }
+
   const hit=pick(mx,my);
   if(!hit) return;
   S.active=hit.run;
-  if(e.shiftKey){
-    snap();
-    const r=S.runs[hit.run], k=r.anchors.indexOf(hit.idx);
-    if(k>=0) r.anchors.splice(k,1); else r.anchors.push(hit.idx);
-    refresh(); return;
-  }
   snap(); S.drag=hit; refresh();
 });
 
 cv.addEventListener("pointermove",e=>{
   const rc=cv.getBoundingClientRect(), mx=e.clientX-rc.left, my=e.clientY-rc.top;
   const m=toM(mx,my); S.cursor=m;
+  if(S.dragAnchor>=0){
+    const a=S.anchors[S.dragAnchor];
+    a.x=snapM(m[0]); a.y=snapM(m[1]);
+    relaxAll();                 // the ducts give way as the post moves through them
+    draw(); stats(); writeJSON(); return;
+  }
   if(S.drag){
     const r=S.runs[S.drag.run];
     r.pts[S.drag.idx][0]=snapM(m[0]);
@@ -348,11 +398,12 @@ cv.addEventListener("pointermove",e=>{
     draw(); stats(); writeJSON(); return;
   }
   const h=pick(mx,my); S.hover=h;
-  cv.style.cursor=h?"grab":"crosshair";
+  S.hoverAnchor=pickAnchor(mx,my);
+  cv.style.cursor=(h||S.hoverAnchor>=0)?"grab":"crosshair";
   draw(); stats();
 });
 
-function up(){ S.drag=null; refresh(); }
+function up(){ S.drag=null; S.dragAnchor=-1; refresh(); }
 cv.addEventListener("pointerup",up);
 cv.addEventListener("pointercancel",up);
 cv.addEventListener("pointerleave",()=>{S.cursor=null; draw();});
@@ -363,7 +414,7 @@ addEventListener("keydown",e=>{
 });
 function undo(){
   const p=S.hist.pop(); if(!p) return;
-  S.runs=JSON.parse(p);
+  const o=JSON.parse(p); S.runs=o.r; S.anchors=o.a||[];
   if(S.active>=S.runs.length) S.active=S.runs.length-1;
   refresh();
 }
@@ -379,7 +430,6 @@ function renderList(){
     const el=document.createElement("div");
     el.className="item"+(i===S.active?" active":"");
     el.innerHTML='<span class="sw"></span><span class="nm"></span>'
-      +'<span class="an">'+(r.anchors.length?("⚓"+r.anchors.length):"")+'</span>'
       +'<span>'+chainLength(r).toFixed(2)+' m</span>';
     el.querySelector(".nm").textContent=r.name;
     el.onclick=()=>{S.active=i; refresh();};
@@ -390,7 +440,8 @@ function renderList(){
 function stats(){
   $("sCur").textContent=S.cursor?(S.cursor[0].toFixed(2)+", "+S.cursor[1].toFixed(2)):"—";
   const r=S.runs[S.active];
-  $("sRun").textContent=r?(chainLength(r).toFixed(2)+" m / "+r.pts.length+" nodes / "+r.anchors.length+" anchored"):"—";
+  $("sRun").textContent=r?(chainLength(r).toFixed(2)+" m / "+r.pts.length+" nodes"):"—";
+  $("sAnc").textContent=S.anchors.length+" post"+(S.anchors.length===1?"":"s");
   let tot=0,hoops=0;
   S.runs.forEach(x=>{const L=chainLength(x); tot+=L; hoops+=Math.max(2,Math.round(L/S.duct.spacing)+1);});
   $("sTot").textContent=tot.toFixed(2)+" m";
@@ -403,7 +454,8 @@ function stats(){
 function payload(){
   return {units:"m", arena:{width:S.arena.w, depth:S.arena.d},
     duct:{diameter:S.duct.dia, hoop_spacing:S.duct.spacing},
-    runs:S.runs.map(r=>({name:r.name, anchors:r.anchors.slice(),
+    anchors:S.anchors.map(a=>({x:+a.x.toFixed(3), y:+a.y.toFixed(3), r:+a.r.toFixed(3)})),
+    runs:S.runs.map(r=>({name:r.name,
       points:r.pts.map(p=>[+p[0].toFixed(3),+p[1].toFixed(3)])}))};
 }
 function writeJSON(){ $("json").value=JSON.stringify(payload(),null,1); }
@@ -421,8 +473,8 @@ $("spawn").onclick=()=>{
 };
 $("delRun").onclick=()=>{ if(!S.runs.length) return; snap();
   S.runs.splice(S.active,1); S.active=Math.min(S.active,S.runs.length-1); refresh(); };
-$("clearAnchors").onclick=()=>{ const r=S.runs[S.active]; if(!r) return;
-  snap(); r.anchors=[]; refresh(); };
+$("clearAnchors").onclick=()=>{ if(!S.anchors.length) return;
+  snap(); S.anchors=[]; relaxAll(); refresh(); };
 $("undo").onclick=undo;
 
 $("save").onclick=()=>{
@@ -448,11 +500,12 @@ $("load").onclick=()=>{
       $("ax").value=S.arena.w; $("ay").value=S.arena.d;}
     if(o.duct){S.duct.dia=+o.duct.diameter||S.duct.dia; S.duct.spacing=+o.duct.hoop_spacing||S.duct.spacing;
       $("dia").value=S.duct.dia; $("sp").value=S.duct.spacing;}
+    S.anchors=(o.anchors||[]).map(a=>({x:+a.x, y:+a.y, r:+a.r||S.anchorR}));
     S.runs=o.runs.map((r,i)=>{
       const pts=(r.points||[]).map(p=>[+p[0],+p[1]]);
       let seg=0.5;
       if(pts.length>1) seg=Math.hypot(pts[1][0]-pts[0][0],pts[1][1]-pts[0][1])||0.5;
-      return {name:r.name||("duct "+(i+1)), seg, pts, anchors:(r.anchors||[]).slice()};
+      return {name:r.name||("duct "+(i+1)), seg, pts};
     });
     S.active=S.runs.length-1;
     refresh();
@@ -467,6 +520,11 @@ $("ay").oninput=e=>{S.arena.d=Math.max(2,+e.target.value||20); refresh();};
 $("dia").oninput=e=>{S.duct.dia=Math.max(.05,+e.target.value||.4); refresh();};
 $("sp").oninput=e=>{S.duct.spacing=Math.max(.01,+e.target.value||.05); refresh();};
 $("snap").onchange=e=>{S.snap=e.target.checked;};
+$("ar").oninput=e=>{
+  S.anchorR=Math.max(.05,+e.target.value||.25);
+  S.anchors.forEach(a=>a.r=S.anchorR);
+  relaxAll(); refresh();
+};
 addEventListener("resize",refresh);
 
 // open with one duct on the floor so the tool shows what it does

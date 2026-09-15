@@ -535,7 +535,6 @@ def spawn_duct_path(
     rib_inset: float = 0.0015,
     smooth_render: bool = True,
     speculative_ccd: bool = True,
-    anchor_stations=(),
     ring_colour=(0.03, 0.03, 0.03),
     cloth_colour=(0.95, 0.80, 0.10),
     verbose: bool = True,
@@ -562,8 +561,6 @@ def spawn_duct_path(
         # gives the solver a settled state to work from.
         z = spec.drop_to_floor + 0.05
 
-    anchor_set = set(int(a) for a in anchor_stations)
-
     ring_paths = []
     for i, (x, y, h) in enumerate(stations):
         path = f"{root}/ring_{i:04d}"
@@ -579,10 +576,7 @@ def spawn_duct_path(
             if rib_visual:
                 UsdGeom.Imageable(seg).CreateVisibilityAttr().Set("invisible")
         UsdPhysics.RigidBodyAPI.Apply(prim)
-        # an anchored hoop is STATIC (density 0), the same trick the seam demos
-        # use -- it holds position while the rest of the duct moves around it
-        UsdPhysics.MassAPI.Apply(prim).CreateDensityAttr(
-            0.0 if i in anchor_set else spec.ring_density)
+        UsdPhysics.MassAPI.Apply(prim).CreateDensityAttr(spec.ring_density)
         ring_paths.append(path)
 
     cloth_r = (R + TUBE + clearance) if clearance >= 0 else (R - TUBE + clearance)
@@ -680,8 +674,7 @@ def spawn_duct_path(
         n_bound += len(sp.GetChildren()) if sp and sp.IsValid() else 0
 
     if verbose:
-        print(f"[duct {index:02d}] PATH: {len(stations)} hoops "
-              f"({len(anchor_set)} anchored), {len(pts)} verts, "
+        print(f"[duct {index:02d}] PATH: {len(stations)} hoops, {len(pts)} verts, "
               f"{len(tris)} tris, {n_bound} seam elements "
               f"({'OK' if n_bound else 'ZERO -- FABRIC NOT ATTACHED'})", flush=True)
     return root, ring_paths, 1, n_bound

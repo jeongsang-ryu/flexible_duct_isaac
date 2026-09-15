@@ -6,6 +6,7 @@ so nothing needs converting on the way in:
     {"units":"m",
      "arena":{"width":30,"depth":20},
      "duct":{"diameter":0.40,"hoop_spacing":0.05},
+     "anchors":[{"x":2.0,"y":1.0,"r":0.25}],
      "runs":[{"name":"outer barrier","points":[[x,y],[x,y],...]}]}
 
 A run is a CENTRELINE, not a hoop list. The points are however many the person
@@ -84,30 +85,18 @@ def describe(doc):
     return "\n".join(lines)
 
 
-def anchor_stations(points, anchors, spacing):
-    """Map anchored NODE indices from the planner onto hoop station indices.
+def posts(doc):
+    """The posts the ducts route around, as [(x, y, radius), ...].
 
-    The planner anchors a node of the drawn chain; the builder works in hoops,
-    which are a finer resampling of the same polyline. Both are parameterised
-    by arc length, so converting is just "how far along was that node".
+    These are obstacles in the world, not points on a duct. The planner lets
+    you drop them on the floor and the duct wraps around them; in the scene
+    they become static colliders that hold the duct's shape exactly the same
+    way, so what you arranged in 2-D survives into the simulation.
     """
-    if not anchors:
-        return []
-    import numpy as _np
-
-    p = _np.asarray(points, dtype=_np.float64)
-    if len(p) < 2:
-        return []
-    seg = _np.hypot(*(_np.diff(p, axis=0).T))
-    cum = _np.concatenate([[0.0], _np.cumsum(seg)])
-    total = float(cum[-1])
-    if total <= 0:
-        return []
-    n_station = max(2, int(round(total / spacing)) + 1)
     out = []
-    for a in anchors:
-        a = int(a)
-        if 0 <= a < len(cum):
-            frac = cum[a] / total
-            out.append(int(round(frac * (n_station - 1))))
-    return sorted(set(out))
+    for a in doc.get("anchors", []) or []:
+        try:
+            out.append((float(a["x"]), float(a["y"]), float(a.get("r", 0.25))))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
