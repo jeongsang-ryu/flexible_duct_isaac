@@ -46,6 +46,13 @@ ap.add_argument("--layout", default="",
                 help="track JSON exported from the planner: builds one duct "
                      "per drawn run, following the centreline")
 ap.add_argument("--ground", type=float, default=40.0, help="ground plane size [m]")
+ap.add_argument("--fem", action="store_true",
+                help="volume (FEM) deformable: a solid low-res cylinder that "
+                     "squashes and springs back. No hollow interior.")
+ap.add_argument("--static", action="store_true",
+                help="one swept tube mesh with capsule colliders; nothing moves")
+ap.add_argument("--fem-youngs", type=float, default=5.0e5,
+                help="--fem: stiffness of the material [Pa]; lower = softer")
 ap.add_argument("--rigid", action="store_true",
                 help="build the duct from black discs and yellow sleeves hinged "
                      "by compliant joints, with no cloth at all. ~16x fewer "
@@ -140,8 +147,9 @@ from omni.physx.scripts import deformableUtils  # noqa: E402
 from pxr import Gf, Sdf, UsdGeom, UsdLux, UsdPhysics  # noqa: E402
 
 from duct_sim.builder import (min_segments, rebuild_seams, spawn_duct,  # noqa: E402
-                               spawn_duct_path, spawn_duct_rigid,
-                               spawn_duct_single)
+                               spawn_duct_fem, spawn_duct_path,
+                               spawn_duct_rigid, spawn_duct_single,
+                               spawn_duct_static)
 from duct_sim.freeze import freeze_to_usd  # noqa: E402
 from duct_sim.spec import DuctSpec  # noqa: E402
 from isaacsim.core.api import SimulationContext  # noqa: E402
@@ -208,6 +216,13 @@ if not args.load:
     gx.AddTranslateOp().Set(Gf.Vec3d(0, 0, -0.05))
     gx.AddScaleOp().Set(Gf.Vec3f(args.ground, args.ground, 0.1))
     UsdPhysics.CollisionAPI.Apply(g.GetPrim())
+
+FEM_MAT = "/World/fem_material"
+if args.fem and not stage.GetPrimAtPath(FEM_MAT):
+    deformableUtils.add_deformable_material(
+        stage, FEM_MAT, dynamic_friction=0.6,
+        youngs_modulus=args.fem_youngs, poissons_ratio=0.45, density=120.0)
+    print(f"[build] FEM material: youngs {args.fem_youngs:.3g} Pa", flush=True)
 
 MAT = "/World/cloth_material"
 if not stage.GetPrimAtPath(MAT):
@@ -281,11 +296,19 @@ def _do_spawn_now(length_m):
     idx = _next_index()
     # stagger new ducts sideways so they do not land inside an existing one
     origin = (0.0, idx * 0.9, args.height)
-    if args.rigid:
+    if args.rigid or args.fem or args.static:
         # a straight line of stations: the path builder's special case
         n = max(2, int(round(length_m / args.spacing)) + 1)
         st = [(-length_m / 2 + args.spacing * k, origin[1], 0.0)
               for k in range(n)]
+        if args.static:
+            spawn_duct_static(stage, idx, st, spec)
+            state["n_ducts"] = idx + 1
+            return
+        if args.fem:
+            spawn_duct_fem(stage, idx, st, spec, FEM_MAT, n_circ=args.n_circ)
+            state["n_ducts"] = idx + 1
+            return
         spawn_duct_rigid(stage, idx, st, spec,
                          bend_limit_deg=args.bend_limit,
                          stiffness=args.stiffness, damping=args.damping,

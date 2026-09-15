@@ -37,8 +37,8 @@ os.environ.setdefault("OMNI_KIT_ACCEPT_EULA", "YES")
 ap = argparse.ArgumentParser()
 ap.add_argument("--n-rings", type=int, default=24)
 ap.add_argument("--spacing", type=float, default=0.05)
-ap.add_argument("--bend-force", type=float, default=2.0)
-ap.add_argument("--bend-steps", type=int, default=500)
+ap.add_argument("--bend-force", type=float, default=1.5)
+ap.add_argument("--bend-steps", type=int, default=900)
 ap.add_argument("--settle-steps", type=int, default=300)
 args = ap.parse_args()
 
@@ -109,14 +109,28 @@ from duct_sim.mouse_drag import _to_backend  # noqa: E402
 from isaacsim.core.prims import RigidPrim  # noqa: E402
 
 view = RigidPrim(rings)
+# ANCHOR THE ENDS. Nothing holds a free duct in place, so a sustained push
+# does not bend it -- it launches it: the first run measured the hoops at
+# y = +140 m and the scan, looking at the floor near the origin, reported "no
+# hits" as though the sensor could not see the duct. That was the test flying
+# off, not a sensor finding.
+# pin ONE end only: pinning both leaves the middle nowhere to go, and the
+# duct bent 0.021 m -- a tenth of its own radius, far too little for the scan
+# to tell a simulated shape from the authored one
+end_view = RigidPrim([rings[0]])
 f = np.zeros((len(rings), 3), dtype=np.float32)
-mid = len(rings) // 2
-for j in range(max(0, mid - 3), min(len(rings), mid + 4)):
+# push the whole downstream half, so the free end swings well clear of where
+# the duct was authored
+for j in range(len(rings) // 2, len(rings)):
     f[j, 1] = args.bend_force
+p_end, q_end = end_view.get_world_poses()
 for _ in range(args.bend_steps):
     view.apply_forces(_to_backend(f), is_global=True)
+    end_view.set_world_poses(p_end, q_end)      # pin both ends
+    end_view.set_velocities(_to_backend(np.zeros((1, 6), dtype=np.float32)))
     sim.step(render=False)
 for _ in range(args.settle_steps):
+    end_view.set_world_poses(p_end, q_end)
     sim.step(render=False)
 
 pos, _ = view.get_world_poses()
@@ -126,13 +140,20 @@ print(f"[lidar] hoop y after bend: min {pos[:,1].min():+.3f} "
       f"{pos[:,1].max()-pos[:,1].min():.3f} m)", flush=True)
 
 # --- rays straight down on a grid; where does the surface actually sit? ---
+# SCAN WHERE THE DUCT ACTUALLY IS. A fixed window around the origin is only
+# correct if the duct stayed there, and the first run proved it need not.
 sq = get_physx_scene_query_interface()
+y_lo = float(pos[:, 1].min()) - 0.6
+y_hi = float(pos[:, 1].max()) + 0.6
+z_top = float(pos[:, 2].max()) + 1.5
+print(f"[lidar] scanning x {pos[:,0].min():+.2f}..{pos[:,0].max():+.2f}, "
+      f"y {y_lo:+.2f}..{y_hi:+.2f} from z={z_top:.2f}", flush=True)
 hits = []
 for x in np.linspace(pos[:, 0].min(), pos[:, 0].max(), 40):
-    for y in np.linspace(-0.6, 0.9, 60):
-        origin = Gf.Vec3d(float(x), float(y), 2.0)
+    for y in np.linspace(y_lo, y_hi, 60):
+        origin = Gf.Vec3d(float(x), float(y), z_top)
         d = Gf.Vec3d(0, 0, -1)
-        h = sq.raycast_closest(origin, d, 4.0)
+        h = sq.raycast_closest(origin, d, z_top + 2.0)
         if h["hit"] and "ground" not in h["collision"]:
             hits.append((x, y, h["position"][2], h["collision"]))
 
@@ -145,14 +166,26 @@ else:
           f"{hy.min():+.3f} .. {hy.max():+.3f}", flush=True)
     print(f"[lidar] hoops occupy y {pos[:,1].min():+.3f} .. {pos[:,1].max():+.3f}",
           flush=True)
-    # the authored duct is a straight line at y = 0
-    off = np.abs(hy).max()
-    print(f"[lidar] furthest hit from the authored centreline (y=0): "
-          f"{off:.3f} m", flush=True)
-    bent = pos[:, 1].max() - pos[:, 1].min()
-    verdict = ("SEES THE BEND" if off > 0.5 * max(bent, 1e-6) + spec.radius * 0.5
-               else "sees only the STRAIGHT duct")
-    print(f"[lidar] VERDICT: {verdict}", flush=True)
+    # the duct was AUTHORED as a straight line at y = 0; if the rays only ever
+    # hit near y = 0 while the hoops have moved, the query is reading USD
+    authored_band = spec.radius + 0.05
+    off_authored = float(np.abs(hy).max())
+    bent = float(np.abs(pos[:, 1]).max())
+    print(f"[lidar] hits reach {off_authored:.3f} m from the authored "
+          f"centreline; hoops reach {bent:.3f} m", flush=True)
+    # DO NOT JUDGE AN EXPERIMENT THAT NEVER SET UP ITS OWN CONDITION. If the
+    # duct did not move appreciably further than its own radius, "the hits are
+    # near y=0" is true of both hypotheses and the run decides nothing.
+    need = spec.radius * 1.5
+    if bent < need:
+        print(f"[lidar] INCONCLUSIVE: the duct only moved {bent:.3f} m, under "
+              f"the {need:.2f} m needed to tell the two apart. Not a sensor "
+              f"finding -- the test failed to bend it.", flush=True)
+    else:
+        verdict = ("SEES THE SIMULATED duct"
+                   if off_authored > authored_band
+                   else "sees only the AUTHORED straight duct")
+        print(f"[lidar] VERDICT: {verdict}", flush=True)
     names = {}
     for h in hits:
         key = h[3].split("/")[-2] if "/" in h[3] else h[3]

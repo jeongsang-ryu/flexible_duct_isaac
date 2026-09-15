@@ -116,6 +116,44 @@ traces the **colliders**.
   off Python.
 - **fem** is a curiosity here: cheap, but it models a solid rod, not a duct.
 
+## Seeing them
+
+All five build straight from the GUI, so they can be compared by eye rather
+than only by table:
+
+```bash
+python scripts/duct_build_gui.py            # cloth
+python scripts/duct_build_gui.py --rigid    # disc/sleeve chain
+python scripts/duct_build_gui.py --fem      # solid continuum
+python scripts/duct_build_gui.py --static   # swept tube, nothing moves
+```
+
+`--fem-youngs` sets how soft the continuum is (1e5 rubbery, 1e6 firm);
+`--stiffness` / `--damping` / `--mass-per-m` tune the chain.
+
+## Which surface a sensor sees — still unanswered
+
+Whether a lidar returns the *simulated* duct or the *authored* one is the one
+question here with no answer, and it matters most for `hybrid`, where the render
+and collision surfaces differ by the rib amplitude by design.
+
+`scripts/test_lidar_sees_bend.py` has been run three times and **every run was
+invalid for a different reason**, each time my test's fault rather than a
+sensor finding:
+
+1. the push launched the free duct **140 m** away; the scan looked at the floor
+   near the origin and found nothing, which says nothing about the sensor
+2. pinning both ends left the middle nowhere to go — it bent **0.021 m**, a
+   tenth of the duct's own radius, far too little to tell the two hypotheses
+   apart
+3. pinning one end produced a real **0.867 m** bend, but only **36 of 2,400
+   rays** hit anything, all on three hoops — too small a sample to conclude from
+
+The script now refuses to print a verdict when the bend is under 1.5× the duct
+radius, so at least it can no longer report a conclusion it has not earned. The
+honest next step is probably an actual RTX lidar in the viewport, looked at,
+rather than a fourth scripted attempt.
+
 ## Reproducing
 
 ```bash
