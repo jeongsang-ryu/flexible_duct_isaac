@@ -51,6 +51,10 @@ ap.add_argument("--fem", action="store_true",
                      "squashes and springs back. No hollow interior.")
 ap.add_argument("--static", action="store_true",
                 help="one swept tube mesh with capsule colliders; nothing moves")
+ap.add_argument("--pusher", type=float, default=0.0,
+                help="drop a draggable ball of this radius [m] to prod the duct "
+                     "with. Needed for --fem and --static, which have no rigid "
+                     "bodies for SHIFT+drag to grab. 0 = auto.")
 ap.add_argument("--fem-youngs", type=float, default=5.0e5,
                 help="--fem: stiffness of the material [Pa]; lower = softer")
 ap.add_argument("--rigid", action="store_true",
@@ -265,12 +269,37 @@ def _next_index():
     return i
 
 
+def _make_pusher(radius):
+    """A heavy ball you can grab and shove into the duct.
+
+    SHIFT+drag works by pushing RIGID BODIES, and --fem and --static have none
+    -- the duct is a single deformable, or scenery. Without this there is
+    literally nothing for the gesture to take hold of, which reads as "it will
+    not deform" when in fact nothing was ever touching it.
+    """
+    path = "/World/pusher"
+    if stage.GetPrimAtPath(path):
+        return path
+    b = UsdGeom.Sphere.Define(stage, path)
+    b.CreateRadiusAttr(float(radius))
+    b.CreateDisplayColorAttr().Set([Gf.Vec3f(0.15, 0.45, 0.85)])
+    UsdGeom.Xformable(b).AddTranslateOp().Set(
+        Gf.Vec3d(0.0, -spec.radius * 4.0, radius))
+    UsdPhysics.CollisionAPI.Apply(b.GetPrim())
+    UsdPhysics.RigidBodyAPI.Apply(b.GetPrim())
+    UsdPhysics.MassAPI.Apply(b.GetPrim()).CreateMassAttr(2.0)
+    print(f"[build] pusher ball r={radius} m — SHIFT+drag it into the duct",
+          flush=True)
+    return path
+
+
 def _refresh_dragger():
     """Rebuild the drag target list so newly spawned ducts are grabbable too."""
     rings = sorted(str(p.GetPath()) for p in stage.Traverse()
                    # --rigid names its bodies disc_/sleeve_, not ring_; without
                    # this the dragger finds nothing to grab in a rigid scene
-                   if p.GetName().startswith(("ring_", "disc_", "sleeve_"))
+                   if p.GetName().startswith(("ring_", "disc_", "sleeve_",
+                                              "pusher"))
                    and p.HasAPI(UsdPhysics.RigidBodyAPI))
     state["rings"] = rings
     if not rings:
@@ -304,10 +333,14 @@ def _do_spawn_now(length_m):
         if args.static:
             spawn_duct_static(stage, idx, st, spec)
             state["n_ducts"] = idx + 1
+            _make_pusher(args.pusher or spec.radius * 0.8)
+            _refresh_dragger()
             return
         if args.fem:
             spawn_duct_fem(stage, idx, st, spec, FEM_MAT, n_circ=args.n_circ)
             state["n_ducts"] = idx + 1
+            _make_pusher(args.pusher or spec.radius * 0.8)
+            _refresh_dragger()
             return
         spawn_duct_rigid(stage, idx, st, spec,
                          bend_limit_deg=args.bend_limit,
