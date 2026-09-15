@@ -65,6 +65,17 @@ ap.add_argument("--fem-poisson", type=float, default=0.15,
                      "standing in for a hollow tube: near 0.5 the material is "
                      "incompressible and physically cannot squash, however low "
                      "the modulus. Low values let it give way.")
+ap.add_argument("--taut", action="store_true",
+                help="cloth build: draw the fabric well INSIDE the hoops and "
+                     "let the hoop surfaces pull it out, so it goes tight on "
+                     "play instead of hanging slack. Use with a large negative "
+                     "--clearance.")
+ap.add_argument("--surface-sampling", type=float, default=0.02,
+                help="--taut: spacing of attachment points sampled on the hoop")
+ap.add_argument("--fem-rings", type=float, default=0.0,
+                help="--fem: bond a hoop to the body every N metres so the duct "
+                     "reads as ribbed. They deform with it. 0 = none.")
+ap.add_argument("--fem-ring-tube", type=float, default=0.010)
 ap.add_argument("--fem-damping", type=float, default=0.5,
                 help="--fem: elasticity damping; raise it to stop the body "
                      "springing back like rubber")
@@ -329,8 +340,11 @@ def _refresh_dragger():
     rings = sorted(str(p.GetPath()) for p in stage.Traverse()
                    # --rigid names its bodies disc_/sleeve_, not ring_; without
                    # this the dragger finds nothing to grab in a rigid scene
+                   # every body kind any build makes: cloth hoops, chain discs
+                   # and sleeves, FEM bonded hoops, and the pusher ball. Missing
+                   # a prefix here reads as "the duct will not move".
                    if p.GetName().startswith(("ring_", "disc_", "sleeve_",
-                                              "pusher"))
+                                              "hoop_", "pusher"))
                    and p.HasAPI(UsdPhysics.RigidBodyAPI))
     state["rings"] = rings
     if not rings:
@@ -368,7 +382,9 @@ def _do_spawn_now(length_m):
             _refresh_dragger()
             return
         if args.fem:
-            spawn_duct_fem(stage, idx, st, spec, FEM_MAT, n_circ=args.n_circ)
+            spawn_duct_fem(stage, idx, st, spec, FEM_MAT, n_circ=args.n_circ,
+                           ring_every=args.fem_rings,
+                           ring_tube=args.fem_ring_tube)
             state["n_ducts"] = idx + 1
             _make_pusher(args.pusher or spec.radius * 0.8)
             _refresh_dragger()
@@ -386,6 +402,8 @@ def _do_spawn_now(length_m):
         fn = spawn_duct if args.segmented else spawn_duct_single
         kw = ({} if args.segmented
               else {"clearance": args.clearance,
+                    "taut": args.taut,
+                    "surface_sampling": args.surface_sampling,
                     "rib_visual": args.rib_visual,
                     "rib_tube": args.rib_tube,
                     "rib_inset": args.rib_inset,
@@ -584,6 +602,7 @@ if args.layout:
             rib_inset=args.rib_inset,
             smooth_render=not args.no_smooth_render,
             speculative_ccd=not args.no_ccd,
+            taut=args.taut, surface_sampling=args.surface_sampling,
             filtering_offset=(None if state["filtering"] < 0
                               else state["filtering"]))
         state["n_ducts"] = _i + 1

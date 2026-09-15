@@ -30,7 +30,8 @@ from duct_sim.geometry import create_ring, create_ring_visual
 
 
 def create_seam(stage, seam_path, cloth_path, rigid_path,
-                overlap_offset=0.006, filtering_offset=0.012):
+                overlap_offset=0.006, filtering_offset=0.012,
+                rigid_surface=False, surface_sampling=0.02):
     """Attach cloth to a hoop, with the two offsets the one-shot helper leaves unset.
 
     deformableUtils.create_auto_deformable_attachment authors only the two
@@ -74,7 +75,15 @@ def create_seam(stage, seam_path, cloth_path, rigid_path,
             ("physxAutoDeformableAttachment:collisionFilteringOffset",
              float(filtering_offset) if enable_filtering else 0.0),
             ("physxAutoDeformableAttachment:deformableVertexOverlapOffset", float(overlap_offset)),
-            ("physxAutoDeformableAttachment:enableDeformableVertexAttachments", True)):
+            ("physxAutoDeformableAttachment:enableDeformableVertexAttachments", True),
+            # Sampling points on the RIGID surface is what lets a hoop pull the
+            # fabric out to its own radius instead of merely holding it where
+            # it was drawn. With the fabric authored smaller than the hoop, this
+            # is what makes it go taut on play rather than hang slack.
+            ("physxAutoDeformableAttachment:enableRigidSurfaceAttachments",
+             bool(rigid_surface)),
+            ("physxAutoDeformableAttachment:rigidSurfaceSamplingDistance",
+             float(surface_sampling))):
         a = prim.GetAttribute(name)
         if a and a.IsValid():
             a.Set(val)
@@ -109,6 +118,8 @@ def spawn_duct_single(
     rib_inset: float = 0.0015,
     smooth_render: bool = True,
     speculative_ccd: bool = True,
+    taut: bool = False,
+    surface_sampling: float = 0.02,
     ring_colour=(0.03, 0.03, 0.03),
     cloth_colour=(0.95, 0.80, 0.10),
     anchor_ends: bool = False,
@@ -273,7 +284,9 @@ def spawn_duct_single(
     physicsUtils.add_physics_material_to_prim(stage, rp, material_path)
 
     # The capture band has to reach from the fabric across the tube: clearance
-    # plus the full tube diameter, plus a margin.
+    # plus the full tube diameter, plus a margin. In taut mode the fabric is
+    # deliberately far inside the hoop, so the band has to span that gap for the
+    # hoop's surface to find it at all.
     overlap = abs(clearance) + 2 * TUBE + 0.003
     # FILTERING IS NOT OPTIONAL, and it must not be wide either.
     #   off      -> the vertices the seam welds to the hoop also receive contact
@@ -535,6 +548,8 @@ def spawn_duct_path(
     rib_inset: float = 0.0015,
     smooth_render: bool = True,
     speculative_ccd: bool = True,
+    taut: bool = False,
+    surface_sampling: float = 0.02,
     ring_colour=(0.03, 0.03, 0.03),
     cloth_colour=(0.95, 0.80, 0.10),
     verbose: bool = True,
@@ -669,7 +684,8 @@ def spawn_duct_path(
     for i, ring in enumerate(ring_paths):
         seam = f"{sroot}/seam_{i:04d}"
         create_seam(stage, seam, sroot, ring,
-                    overlap_offset=overlap, filtering_offset=filtering)
+                    overlap_offset=overlap, filtering_offset=filtering,
+                    rigid_surface=taut, surface_sampling=surface_sampling)
         sp = stage.GetPrimAtPath(seam)
         n_bound += len(sp.GetChildren()) if sp and sp.IsValid() else 0
 
@@ -1104,7 +1120,11 @@ def spawn_duct_fem(
     z: float = 0.0,
     n_circ: int = 12,
     wall: float = 0.0,
+    ring_every: float = 0.0,
+    ring_tube: float = 0.010,
+    ring_density: float = 300.0,
     colour=(0.95, 0.80, 0.10),
+    ring_colour=(0.03, 0.03, 0.03),
     verbose: bool = True,
 ):
     """A solid low-resolution cylinder as a volume (FEM) deformable.
@@ -1173,7 +1193,62 @@ def spawn_duct_fem(
         except Exception:
             pass
     physicsUtils.add_physics_material_to_prim(stage, rp, material_path)
+
+    # --- optional hoops bonded to the body, so they FOLLOW it as it deforms ---
+    # A ring drawn on the outside and left there would sit still while the duct
+    # squashed underneath it. These are real rigid bodies whose collider sits
+    # just INSIDE the solid, bonded by the same attachment mechanism the cloth
+    # seams use; the torus that is actually seen is drawn on the outside.
+    ring_paths = []
+    n_bound = 0
+    if ring_every > 0:
+        total = 0.0
+        for i in range(len(stations) - 1):
+            total += math.hypot(stations[i + 1][0] - stations[i][0],
+                                stations[i + 1][1] - stations[i][1])
+        seg = total / max(1, len(stations) - 1)
+        step = max(1, int(round(ring_every / seg)))
+        for i in range(0, len(stations), step):
+            x, y, h = stations[i]
+            path = f"{root}/hoop_{i:04d}"
+            # ONE thin cylinder, not a 24-capsule ring. The collider's only job
+            # is to overlap the body so the bond can form -- it never has to be
+            # ring-shaped, because the FEM body is solid and nothing passes
+            # through the middle. The capsule ring cost 31 x 24 = 744 shapes and
+            # tripled the step time (9.5 -> 24 ms) for no behaviour at all.
+            disc = UsdGeom.Cylinder.Define(stage, path)
+            disc.CreateAxisAttr("Z")
+            disc.CreateRadiusAttr(float(r_out - ring_tube * 0.5))
+            disc.CreateHeightAttr(float(ring_tube * 1.2))
+            prim = disc.GetPrim()
+            xf = UsdGeom.Xformable(prim)
+            xf.AddTranslateOp().Set(Gf.Vec3d(float(x), float(y), float(z)))
+            q = (Gf.Rotation(Gf.Vec3d(0, 0, 1), float(h))
+                 * Gf.Rotation(Gf.Vec3d(0, 1, 0), 90.0))
+            xf.AddOrientOp().Set(Gf.Quatf(q.GetQuat()))
+            UsdGeom.Imageable(prim).CreateVisibilityAttr().Set("invisible")
+            UsdPhysics.CollisionAPI.Apply(prim)
+            UsdPhysics.RigidBodyAPI.Apply(prim)
+            UsdPhysics.MassAPI.Apply(prim).CreateMassAttr(0.02)
+            create_ring_visual(stage, f"{path}/rib", r_out + ring_tube * 0.4,
+                               ring_tube, n_major=32, n_minor=8,
+                               colour=ring_colour)
+            seam = f"{root}/bond_{i:04d}"
+            # a narrower capture band: the bond needs the vertices at the hoop,
+            # not a thick slab of them
+            create_seam(stage, seam, root, path,
+                        overlap_offset=ring_tube,
+                        filtering_offset=ring_tube)
+            spm = stage.GetPrimAtPath(seam)
+            n_bound += len(spm.GetChildren()) if spm and spm.IsValid() else 0
+            ring_paths.append(path)
+
     if verbose:
         print(f"[duct {index:02d}] FEM: solid sweep {len(pts)} verts -> "
               f"tetrahedral body", flush=True)
-    return root, [], 1, 0
+        if ring_paths:
+            print(f"[duct {index:02d}] FEM: {len(ring_paths)} hoops bonded to "
+                  f"the body, {n_bound} bond elements "
+                  f"({'OK' if n_bound else 'ZERO -- hoops will not follow'})",
+                  flush=True)
+    return root, ring_paths, 1, n_bound
