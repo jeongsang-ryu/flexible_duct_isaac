@@ -55,12 +55,14 @@ def _to_backend(arr):
 
 class HoopDragger:
     def __init__(self, ring_paths, stiffness=60.0, damping=6.0, max_force=40.0,
-                 pick_radius_px=45.0):
+                 tie_band_px=3.0):
         self.ring_paths = list(ring_paths)
         self.k = float(stiffness)
         self.c = float(damping)
         self.max_force = float(max_force)
-        self.pick_radius_px = float(pick_radius_px)
+        # narrower than the on-screen hoop spacing (4-9 px), so the band
+        # only ever holds hoops that genuinely overlap in the view
+        self.tie_band_px = float(tie_band_px)
 
         self._view = None
         self._held = None          # index into ring_paths
@@ -358,14 +360,27 @@ class HoopDragger:
                 # one nearest the camera, which is the one actually visible
                 # there. The radius is generous because a hoop is 0.4 m across
                 # and the click lands on its surface, not its centre.
+                # Depth may only separate candidates that are at essentially
+                # the SAME pixel -- two ducts overlapping in the view. It must
+                # not reorder neighbours along one duct, and a fixed 45 px
+                # radius did exactly that: hoops sit 4.4 px apart at 16 m and
+                # 8.9 px at 8 m, so 45 px spans five to ten of them and the
+                # nearest-to-camera one wins from anywhere in that window.
+                # Every pick then reported 43-45 px, sitting at the radius,
+                # which is the fingerprint of the radius choosing rather than
+                # the cursor.
                 eye0 = self._eye()
-                if eye0 is not None:
-                    near = d < self.pick_radius_px
-                    if near.any():
-                        depth = np.full(len(d), np.inf)
-                        pos_all = self._positions()
-                        depth[near] = np.linalg.norm(pos_all[near] - eye0, axis=1)
-                        d = np.where(near, depth, np.inf)
+                if eye0 is not None and len(d):
+                    dmin = float(np.min(d))
+                    if np.isfinite(dmin):
+                        # a band narrower than one hoop spacing: only genuine
+                        # co-located candidates get in
+                        tied = d <= dmin + self.tie_band_px
+                        if tied.sum() > 1:
+                            depth = np.full(len(d), np.inf)
+                            pos_all = self._positions()
+                            depth[tied] = np.linalg.norm(pos_all[tied] - eye0, axis=1)
+                            d = np.where(tied, depth, np.inf)
                 i = int(np.argmin(d))
                 if np.isfinite(d[i]):
                     self._held = i
