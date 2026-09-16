@@ -195,6 +195,9 @@ class HoopDragger:
             if win.dock_tab_bar_visible or not (win.flags & omni.ui.WINDOW_FLAGS_NO_TITLE_BAR):
                 tab_h = 22 * dpi
 
+            fx = frame.screen_position_x - (getattr(win, "position_x", 0.0) or 0.0)
+            fy = frame.screen_position_y - (getattr(win, "position_y", 0.0) or 0.0)
+
             out = np.full((len(self.ring_paths), 2), np.inf, dtype=np.float64)
             for i, p in enumerate(self._positions()):
                 ndc = mvp.Transform(Gf.Vec3d(float(p[0]), float(p[1]), float(p[2])))
@@ -202,8 +205,14 @@ class HoopDragger:
                     continue
                 x = (ndc[0] + 1.0) * 0.5
                 y = 1.0 - (ndc[1] + 1.0) * 0.5
-                out[i, 0] = dpi * (frame.screen_position_x + x * frame.computed_width) - splitter
-                out[i, 1] = (dpi * (frame.screen_position_y + y * frame.computed_height)
+                # frame.screen_position_* is relative to the SCREEN, while
+                # carb reports the cursor relative to the WINDOW. Mixing them
+                # offsets every projection by the window's position on screen
+                # -- measured as picks landing 160-392 px from the cursor while
+                # the poses themselves were correct. Subtract the window origin
+                # so both sides are window-relative.
+                out[i, 0] = dpi * (fx + x * frame.computed_width) - splitter
+                out[i, 1] = (dpi * (fy + y * frame.computed_height)
                              - tab_h - splitter)
             return out
         except Exception as exc:
@@ -341,10 +350,10 @@ class HoopDragger:
                     pos = self._positions()[i]
                     self._depth = (float(np.linalg.norm(pos - eye))
                                    if eye is not None else 1.0)
-                    px = float(np.linalg.norm(
-                        scr[i] - np.array([mx, my], dtype=np.float64)))
+                    off = scr[i] - np.array([mx, my], dtype=np.float64)
                     print(f"[drag] grabbed {self.ring_paths[i]} "
-                          f"({px:.0f} px from the cursor, "
+                          f"({np.linalg.norm(off):.0f} px from the cursor, "
+                          f"offset ({off[0]:+.0f}, {off[1]:+.0f}), "
                           f"{self._depth:.1f} m from the camera)", flush=True)
 
             ray = self._camera_ray() if self._held is None else None

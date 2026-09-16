@@ -39,6 +39,14 @@ ap.add_argument("--spacing", type=float, default=0.0,
                 help="hoop spacing in m. 0 = take it from the layout file, else 0.05. Hoop count is the dominant cost: 0.05 -> 0.10 halves the hoops and halves the step time, and 0.10 is what real flexible duct uses anyway.")
 ap.add_argument("--height", type=float, default=0.5, help="spawn height [m]")
 ap.add_argument("--n-circ", type=int, default=28)
+ap.add_argument("--builtin-grab", action="store_true",
+                help="use Isaac's own physics grab instead of the hand-rolled "
+                     "dragger. It was disabled because PxRigidDynamic::addForce "
+                     "is illegal under the direct-GPU API -- but that API comes "
+                     "from SimulationContext(device='cuda'), NOT from "
+                     "enableGPUDynamics. Running the tensor pipeline on cpu "
+                     "while the deformable solver stays on the GPU may leave "
+                     "addForce legal. Untested until measured.")
 ap.add_argument("--bend-in", type=int, default=0, metavar="STEPS",
                 help="build the duct STRAIGHT and drive the hoops to the "
                      "layout over STEPS. Without this the duct is born curved, "
@@ -310,20 +318,31 @@ if not stage.GetPrimAtPath(MAT):
 print(f"[build] cloth: stretch {args.stretch:.3g}, shear {args.shear:.3g}, "
       f"bend {args.bend:.3g}", flush=True)
 
-# the built-in grab calls PxRigidDynamic::addForce, illegal under direct-GPU
-# API (which cloth forces on) -- it errors every frame and kills the window
-try:
-    _s = carb.settings.get_settings()
-    _s.set("/physics/mouseInteractionEnabled", False)
-    _s.set("/physics/mouseGrab", False)
-    import omni.kit.app
-    _mgr = omni.kit.app.get_app().get_extension_manager()
-    if _mgr.is_extension_enabled("omni.physx.ui"):
-        _mgr.set_extension_enabled_immediate("omni.physx.ui", False)
-except Exception as exc:
-    print(f"[build] could not disable built-in grab: {exc}", flush=True)
+# The built-in grab calls PxRigidDynamic::addForce, which is illegal under the
+# direct-GPU API and errors every frame until the window dies. That API is
+# turned on by SimulationContext(device="cuda") -- it is NOT the same switch as
+# enableGPUDynamics, which is what actually puts the deformable solver on the
+# GPU. So --builtin-grab runs the tensor pipeline on cpu and leaves GPU
+# dynamics on: the cloth still solves on the GPU, and addForce may be legal
+# again. If it is, Isaac's own grab replaces the hand-rolled dragger entirely.
+if args.builtin_grab:
+    print("[build] built-in physics grab ENABLED, tensor pipeline on cpu "
+          "(deformables still solve on the GPU). Shift + left-drag a hoop.",
+          flush=True)
+else:
+    try:
+        _s = carb.settings.get_settings()
+        _s.set("/physics/mouseInteractionEnabled", False)
+        _s.set("/physics/mouseGrab", False)
+        import omni.kit.app
+        _mgr = omni.kit.app.get_app().get_extension_manager()
+        if _mgr.is_extension_enabled("omni.physx.ui"):
+            _mgr.set_extension_enabled_immediate("omni.physx.ui", False)
+    except Exception as exc:
+        print(f"[build] could not disable built-in grab: {exc}", flush=True)
 
-sim = SimulationContext(stage_units_in_meters=1.0, device="cuda")
+sim = SimulationContext(stage_units_in_meters=1.0,
+                        device="cpu" if args.builtin_grab else "cuda")
 sim.initialize_physics()
 scene_prim.GetAttribute("physxScene:enableGPUDynamics").Set(True)
 sim.play()
@@ -398,6 +417,12 @@ def _refresh_dragger():
         except Exception as exc:
             print(f"[build] re-play failed: {exc}", flush=True)
     state["rings"] = rings
+    if args.builtin_grab:
+        # two draggers fighting over the same body is worse than either alone
+        state["dragger"] = None
+        print(f"[build] {len(rings)} hoops grabbable via the built-in grab",
+              flush=True)
+        return
     try:
         from duct_sim.mouse_drag import HoopDragger
         state["dragger"] = HoopDragger(rings, stiffness=args.drag_stiffness,
