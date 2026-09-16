@@ -54,11 +54,13 @@ def _to_backend(arr):
 
 
 class HoopDragger:
-    def __init__(self, ring_paths, stiffness=60.0, damping=6.0, max_force=40.0):
+    def __init__(self, ring_paths, stiffness=60.0, damping=6.0, max_force=40.0,
+                 pick_radius_px=45.0):
         self.ring_paths = list(ring_paths)
         self.k = float(stiffness)
         self.c = float(damping)
         self.max_force = float(max_force)
+        self.pick_radius_px = float(pick_radius_px)
 
         self._view = None
         self._held = None          # index into ring_paths
@@ -317,36 +319,21 @@ class HoopDragger:
             if scr is not None:
                 mx, my = self._input.get_mouse_coords_pixel(self._mouse)
                 d = np.linalg.norm(scr - np.array([mx, my], dtype=np.float64), axis=1)
-                if not getattr(self, "_dumped", False):
-                    # ONE-SHOT DIAGNOSTIC. The first screen-space attempt still
-                    # grabbed a hoop 535 px away and always index 0, which says
-                    # the projection is landing somewhere wrong rather than
-                    # being slightly off. Print the spaces involved instead of
-                    # guessing which one is at fault.
-                    self._dumped = True
-                    fin = np.isfinite(scr[:, 0])
-                    print(f"[drag/dbg] cursor px=({mx:.0f}, {my:.0f})", flush=True)
-                    print(f"[drag/dbg] hoops finite {int(fin.sum())}/{len(scr)}",
-                          flush=True)
-                    if fin.any():
-                        f = scr[fin]
-                        print(f"[drag/dbg] projected x {f[:,0].min():.0f}..{f[:,0].max():.0f}  "
-                              f"y {f[:,1].min():.0f}..{f[:,1].max():.0f}", flush=True)
-                        print(f"[drag/dbg] nearest {d[np.argmin(d)]:.0f} px, "
-                              f"farthest {np.nanmax(d[np.isfinite(d)]):.0f} px", flush=True)
-                    try:
-                        import omni.ui
-                        from omni.kit.viewport.utility import get_active_viewport_window
-                        w = get_active_viewport_window()
-                        fr = w.frame
-                        print(f"[drag/dbg] frame screen=({fr.screen_position_x:.0f}, "
-                              f"{fr.screen_position_y:.0f}) size=({fr.computed_width:.0f}, "
-                              f"{fr.computed_height:.0f}) dpi={omni.ui.Workspace.get_dpi_scale():.2f} "
-                              f"tab={w.dock_tab_bar_visible}", flush=True)
-                        print(f"[drag/dbg] viewport resolution={w.viewport_api.resolution}",
-                              flush=True)
-                    except Exception as exc:
-                        print(f"[drag/dbg] frame unavailable: {exc}", flush=True)
+                # DEPTH BREAKS THE TIE. Nearest-in-pixels alone grabs whatever
+                # projects closest, which on an overlapping run of hoops can be
+                # one BEHIND the duct you clicked -- "sometimes it moves
+                # something else". Among everything under the cursor, take the
+                # one nearest the camera, which is the one actually visible
+                # there. The radius is generous because a hoop is 0.4 m across
+                # and the click lands on its surface, not its centre.
+                eye0 = self._eye()
+                if eye0 is not None:
+                    near = d < self.pick_radius_px
+                    if near.any():
+                        depth = np.full(len(d), np.inf)
+                        pos_all = self._positions()
+                        depth[near] = np.linalg.norm(pos_all[near] - eye0, axis=1)
+                        d = np.where(near, depth, np.inf)
                 i = int(np.argmin(d))
                 if np.isfinite(d[i]):
                     self._held = i
@@ -354,8 +341,11 @@ class HoopDragger:
                     pos = self._positions()[i]
                     self._depth = (float(np.linalg.norm(pos - eye))
                                    if eye is not None else 1.0)
+                    px = float(np.linalg.norm(
+                        scr[i] - np.array([mx, my], dtype=np.float64)))
                     print(f"[drag] grabbed {self.ring_paths[i]} "
-                          f"({d[i]:.0f} px from the cursor)", flush=True)
+                          f"({px:.0f} px from the cursor, "
+                          f"{self._depth:.1f} m from the camera)", flush=True)
 
             ray = self._camera_ray() if self._held is None else None
             if ray is not None:
