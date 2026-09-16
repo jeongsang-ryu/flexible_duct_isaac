@@ -73,6 +73,8 @@ class HoopDragger:
         self._target = None        # world-space goal, moved by mouse DELTAS
         self._last_mouse = None
         self._saw_shift = False
+        self._saw_keys = set()
+        self._warned_arm = False
         self._saw_mouse = False
 
     # -- lazily build the view: RigidPrim allocates GPU tensors, so do it after play
@@ -103,14 +105,31 @@ class HoopDragger:
                 print(f"[drag] hoop poses span {spread:.2f} m", flush=True)
         return self._view
 
+    # Keys that arm the drag. SHIFT is the documented one but it is a
+    # modifier, and modifiers can be consumed before they reach carb -- the log
+    # showed "left button detected" with no matching "shift detected", so the
+    # click was arriving and the modifier was not. G is a plain letter and
+    # cannot be swallowed the same way, so it is offered as an alternative
+    # rather than a replacement.
+    _ARM_KEYS = (("LEFT_SHIFT", "shift"), ("RIGHT_SHIFT", "shift"), ("G", "G"))
+
     def _shift_down(self):
-        for dev in (self._kb, None):
-            try:
-                if (self._input.get_keyboard_value(dev, carb.input.KeyboardInput.LEFT_SHIFT)
-                        or self._input.get_keyboard_value(dev, carb.input.KeyboardInput.RIGHT_SHIFT)):
-                    return True
-            except Exception:
-                continue
+        # device None FIRST. Kit polls the mouse as get_mouse_value(None, ...)
+        # and passing the app window's handle returns 0 forever; the keyboard
+        # behaves the same way, and trying the handle first hid that.
+        for dev in (None, self._kb):
+            for attr, label in self._ARM_KEYS:
+                key = getattr(carb.input.KeyboardInput, attr, None)
+                if key is None:
+                    continue
+                try:
+                    if self._input.get_keyboard_value(dev, key):
+                        if label not in self._saw_keys:
+                            self._saw_keys.add(label)
+                            print(f"[drag] armed by {label}", flush=True)
+                        return True
+                except Exception:
+                    continue
         return False
 
     def _mouse_down(self):
@@ -305,9 +324,14 @@ class HoopDragger:
         shift, mouse = self._shift_down(), self._mouse_down()
         # say so the FIRST time each is seen, so "nothing happens" can be told
         # apart from "shift was read but the click was not"
-        if shift and not self._saw_shift:
-            self._saw_shift = True
-            print("[drag] shift detected", flush=True)
+        # _shift_down already names which key armed it, so this would only
+        # repeat it. What is worth saying once is the opposite case: the click
+        # arrives and nothing arms it, which is exactly what happened -- "left
+        # button detected" with no arming key, and silence from there.
+        if mouse and not shift and not self._saw_keys and not self._warned_arm:
+            self._warned_arm = True
+            print("[drag] click seen but no arming key -- hold SHIFT or G "
+                  "while dragging", flush=True)
         if mouse and not self._saw_mouse:
             self._saw_mouse = True
             print("[drag] left button detected", flush=True)

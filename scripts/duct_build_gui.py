@@ -584,7 +584,7 @@ try:
             ui.Button("Spawn duct", height=30,
                       clicked_fn=lambda: do_spawn(_len.model.get_value_as_float()))
             ui.Spacer(height=4)
-            ui.Label("2. place:  SHIFT + left-drag a black hoop", height=18)
+            ui.Label("2. place:  hold SHIFT or G + left-drag a hoop", height=18)
             ui.Spacer(height=4)
             ui.Label("3. keep / save", height=18)
             with ui.HStack(spacing=6, height=26):
