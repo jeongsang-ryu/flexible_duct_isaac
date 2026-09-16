@@ -75,6 +75,8 @@ class HoopDragger:
         self._saw_shift = False
         self._saw_keys = set()
         self._warned_arm = False
+        self._calib = 0
+        self._last_frame = None
         self._saw_mouse = False
 
     # -- lazily build the view: RigidPrim allocates GPU tensors, so do it after play
@@ -206,17 +208,21 @@ class HoopDragger:
                 return None
             vp = win.viewport_api
             mvp = vp.world_to_ndc
-            frame = win.frame
 
+            # MEASURED, not assumed. Solving each pick backwards for the
+            # frame size that would have put the grabbed hoop under the cursor
+            # returned 1285x719 against a widget of 949x577 -- that is the
+            # RENDER TEXTURE (1280x720). carb reports the cursor in texture
+            # pixels, so the widget rectangle, its dpi scaling, the dock
+            # splitter and the tab bar are all irrelevant here; they describe
+            # where the viewport sits on screen, which is a different question.
+            # Copying get_ui_position_for_prim was the mistake: that function
+            # places UI overlays in window space, not mouse picks.
+            res = vp.resolution
+            res_w, res_h = float(res[0]), float(res[1])
             dpi = omni.ui.Workspace.get_dpi_scale() or 1.0
-            splitter = 4 * dpi                      # kit's dock splitter
-            tab_h = 0
-            if win.dock_tab_bar_visible or not (win.flags & omni.ui.WINDOW_FLAGS_NO_TITLE_BAR):
-                tab_h = 22 * dpi
 
-            fx = frame.screen_position_x - (getattr(win, "position_x", 0.0) or 0.0)
-            fy = frame.screen_position_y - (getattr(win, "position_y", 0.0) or 0.0)
-
+            self._last_frame = (res_w, res_h, 0.0, 0.0, dpi)
             out = np.full((len(self.ring_paths), 2), np.inf, dtype=np.float64)
             for i, p in enumerate(self._positions()):
                 ndc = mvp.Transform(Gf.Vec3d(float(p[0]), float(p[1]), float(p[2])))
@@ -224,15 +230,8 @@ class HoopDragger:
                     continue
                 x = (ndc[0] + 1.0) * 0.5
                 y = 1.0 - (ndc[1] + 1.0) * 0.5
-                # frame.screen_position_* is relative to the SCREEN, while
-                # carb reports the cursor relative to the WINDOW. Mixing them
-                # offsets every projection by the window's position on screen
-                # -- measured as picks landing 160-392 px from the cursor while
-                # the poses themselves were correct. Subtract the window origin
-                # so both sides are window-relative.
-                out[i, 0] = dpi * (fx + x * frame.computed_width) - splitter
-                out[i, 1] = (dpi * (fy + y * frame.computed_height)
-                             - tab_h - splitter)
+                out[i, 0] = x * res_w
+                out[i, 1] = y * res_h
             return out
         except Exception as exc:
             if not getattr(self, "_warned_screen", False):
@@ -375,6 +374,27 @@ class HoopDragger:
                     self._depth = (float(np.linalg.norm(pos - eye))
                                    if eye is not None else 1.0)
                     off = scr[i] - np.array([mx, my], dtype=np.float64)
+                    # PER-PICK CALIBRATION. The offsets are not constant
+                    # (-332..+339 in x), so this is not a fixed shift; it looks
+                    # like the NDC->pixel SCALE is wrong. Report what the
+                    # mapping was built from, and what scale would have put the
+                    # picked hoop exactly under the cursor, so the right one can
+                    # be read off instead of guessed at a seventh time.
+                    if self._calib < 6:
+                        self._calib += 1
+                        c = self._last_frame
+                        if c:
+                            fw, fh, fx0, fy0, dpi = c
+                            # solve for the width/height that makes scr[i] == cursor
+                            nx = (scr[i][0] - fx0) / fw if fw else 0.0
+                            ny = (scr[i][1] - fy0) / fh if fh else 0.0
+                            need_w = (mx - fx0) / nx if abs(nx) > 1e-6 else float("nan")
+                            need_h = (my - fy0) / ny if abs(ny) > 1e-6 else float("nan")
+                            print(f"[calib] frame {fw:.0f}x{fh:.0f} at "
+                                  f"({fx0:.0f},{fy0:.0f}) dpi {dpi:.2f} | "
+                                  f"cursor ({mx:.0f},{my:.0f}) | "
+                                  f"implied frame {need_w:.0f}x{need_h:.0f}",
+                                  flush=True)
                     print(f"[drag] grabbed {self.ring_paths[i]} "
                           f"({np.linalg.norm(off):.0f} px from the cursor, "
                           f"offset ({off[0]:+.0f}, {off[1]:+.0f}), "
