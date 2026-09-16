@@ -376,10 +376,28 @@ def _refresh_dragger():
                    if p.GetName().startswith(("ring_", "disc_", "sleeve_",
                                               "hoop_", "pusher"))
                    and p.HasAPI(UsdPhysics.RigidBodyAPI))
-    state["rings"] = rings
     if not rings:
+        state["rings"] = rings
         state["dragger"] = None
         return
+
+    # RE-PLAY WHEN THE BODY SET CHANGES. sim.play() happens on an empty scene
+    # long before any duct exists, so PhysX builds its simulation view with no
+    # bodies in it and never picks up the ones spawned afterwards. Every hoop
+    # then reads back at the origin -- measured: 2.995 m of span with build
+    # before play, 0.000 m with play before build, 2.995 m again after a
+    # stop/play. That zero is what made the dragger always grab hoop 0 and then
+    # fault the GPU on apply_forces, and it looked for all the world like a
+    # coordinate bug.
+    if rings != state.get("rings"):
+        try:
+            sim.stop()
+            sim.play()
+            print(f"[build] re-played so physics binds {len(rings)} new "
+                  f"bodies", flush=True)
+        except Exception as exc:
+            print(f"[build] re-play failed: {exc}", flush=True)
+    state["rings"] = rings
     try:
         from duct_sim.mouse_drag import HoopDragger
         state["dragger"] = HoopDragger(rings, stiffness=args.drag_stiffness,
