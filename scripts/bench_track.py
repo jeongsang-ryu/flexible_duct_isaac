@@ -21,6 +21,12 @@ ap.add_argument("--layout", required=True)
 ap.add_argument("--n-circ", type=int, default=40)
 ap.add_argument("--ring-segments", type=int, default=16)
 ap.add_argument("--rib-visual", type=int, default=1)
+ap.add_argument("--spacing", type=float, default=0.0,
+                help="override the layout hoop spacing. Hoop count is the dominant cost -- hoops alone measured 17.4 ms against the deformable's 8.4 -- so this is the biggest single lever.")
+ap.add_argument("--repeat", type=float, default=1.0,
+                help="scale total duct length, to reach a 100 m target from an 81 m layout")
+ap.add_argument("--hz", type=float, default=0.0,
+                help="physics rate. Step cost is NOT constant in dt -- a smaller step converges with less work -- so scaling a 60 Hz number by 200/60 is an upper bound, not a measurement.")
 ap.add_argument("--static", action="store_true",
                 help="frozen swept tube + capsule colliders, no bodies -- what a track becomes after freeze, and the only variant that could carry thousands of parallel cars")
 ap.add_argument("--solid-hoop", action="store_true",
@@ -90,7 +96,7 @@ doc = load(args.layout)
 # DuctSpec is a frozen dataclass -- replace, do not assign
 import dataclasses  # noqa: E402
 spec = dataclasses.replace(DuctSpec(), ring_segments=args.ring_segments)
-spacing = doc.get("duct", {}).get("hoop_spacing", 0.05)
+spacing = args.spacing or doc.get("duct", {}).get("hoop_spacing", 0.05)
 
 t0 = time.perf_counter()
 n_hoops = 0
@@ -142,7 +148,8 @@ for p in stage.Traverse():
 
 from isaacsim.core.api import SimulationContext  # noqa: E402
 
-sim = SimulationContext(stage_units_in_meters=1.0, device="cuda")
+sim = SimulationContext(stage_units_in_meters=1.0, device="cuda",
+                        physics_dt=(1.0 / args.hz) if args.hz else None)
 sim.initialize_physics()
 sp.GetAttribute("physxScene:enableGPUDynamics").Set(True)
 sim.play()
@@ -162,7 +169,7 @@ for _ in range(args.measure):
     sim.step(render=True)
 both_ms = (time.perf_counter() - t) / args.measure * 1e3
 
-info = dict(tag=args.tag, hoops=n_hoops, n_circ=args.n_circ,
+info = dict(tag=args.tag, hz=(args.hz or 60.0), spacing_m=spacing, hoops=n_hoops, n_circ=args.n_circ,
             ring_segments=args.ring_segments, rib_visual=bool(args.rib_visual),
             no_fabric=args.no_fabric, solid_hoop=args.solid_hoop,
             static=args.static,

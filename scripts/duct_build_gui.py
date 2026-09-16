@@ -35,11 +35,16 @@ os.environ.setdefault("OMNI_KIT_ACCEPT_EULA", "YES")
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--length", type=float, default=2.0, help="default duct length [m]")
-ap.add_argument("--spacing", type=float, default=0.05,
-                help="hoop spacing [m]. 0.05 requested for the track; note "
-                     "this doubles the hoop and sleeve count per metre")
+ap.add_argument("--spacing", type=float, default=0.0,
+                help="hoop spacing in m. 0 = take it from the layout file, else 0.05. Hoop count is the dominant cost: 0.05 -> 0.10 halves the hoops and halves the step time, and 0.10 is what real flexible duct uses anyway.")
 ap.add_argument("--height", type=float, default=0.5, help="spawn height [m]")
 ap.add_argument("--n-circ", type=int, default=28)
+ap.add_argument("--bend-in", type=int, default=0, metavar="STEPS",
+                help="build the duct STRAIGHT and drive the hoops to the "
+                     "layout over STEPS. Without this the duct is born curved, "
+                     "so the corners carry zero strain and the creasing there "
+                     "is whatever the mesh generator produced rather than what "
+                     "the fabric would do. 600 is a reasonable start.")
 ap.add_argument("--solid-hoop", action="store_true",
                 help="one convex disc per hoop instead of 16 capsules. The "
                      "capsule chain is the most expensive thing in a track: "
@@ -391,14 +396,14 @@ def do_spawn(length_m):
 
 
 def _do_spawn_now(length_m):
-    n_rings = max(2, int(round(length_m / args.spacing)) + 1)
+    n_rings = max(2, int(round(length_m / (args.spacing or 0.05))) + 1)
     idx = _next_index()
     # stagger new ducts sideways so they do not land inside an existing one
     origin = (0.0, idx * 0.9, args.height)
     if args.rigid or args.fem or args.static:
         # a straight line of stations: the path builder's special case
-        n = max(2, int(round(length_m / args.spacing)) + 1)
-        st = [(-length_m / 2 + args.spacing * k, origin[1], 0.0)
+        n = max(2, int(round(length_m / (args.spacing or 0.05))) + 1)
+        st = [(-length_m / 2 + (args.spacing or 0.05) * k, origin[1], 0.0)
               for k in range(n)]
         if args.static:
             spawn_duct_static(stage, idx, st, spec)
@@ -438,7 +443,7 @@ def _do_spawn_now(length_m):
                     "self_collision_distance": args.self_collision_distance,
                     "filtering_offset": (None if state["filtering"] < 0
                                          else state["filtering"])})
-        fn(stage, idx, n_rings, args.spacing, spec, MAT,
+        fn(stage, idx, n_rings, (args.spacing or 0.05), spec, MAT,
            origin=origin, n_circ=args.n_circ, solid_hoop=args.solid_hoop, **kw)
         state["n_ducts"] = idx + 1
         _refresh_dragger()
@@ -575,12 +580,16 @@ try:
 except Exception as exc:
     print(f"[build] keyboard unavailable: {exc}", flush=True)
 
+_benders = []          # (rings, goal stations) per duct, layout mode only
 if args.layout:
     # a drawn layout replaces the default straight spawn entirely
     from duct_sim.layout import describe, load, posts, resample
 
     _doc = load(args.layout)
-    _sp = float(_doc.get("duct", {}).get("hoop_spacing", args.spacing))
+    # an explicit --spacing overrides the file; the file only fills the gap
+    _sp = float(args.spacing or _doc.get("duct", {}).get("hoop_spacing", 0.05))
+    print(f"[build] hoop spacing {_sp:.3f} m "
+          f"({'--spacing' if args.spacing else 'from layout'})", flush=True)
     print(f"[build] layout {args.layout}", flush=True)
     print(describe(_doc), flush=True)
 
@@ -609,6 +618,10 @@ if args.layout:
         if len(_st) < 2:
             print(f"[build] run {_i} has too few points; skipped", flush=True)
             continue
+        _goal = _st
+        if args.bend_in > 0:
+            from duct_sim.bend import straight_stations  # noqa: E402
+            _st = straight_stations(_st)
         if args.rigid:
             spawn_duct_rigid(stage, _i, _st, spec,
                              bend_limit_deg=args.bend_limit,
@@ -618,7 +631,7 @@ if args.layout:
                              solver_pos_iters=args.solver_iters)
             state["n_ducts"] = _i + 1
             continue
-        spawn_duct_path(
+        _root, _rings, _, _ = spawn_duct_path(
             stage, _i, _st, spec, MAT,
             n_circ=args.n_circ, clearance=args.clearance,
             self_collision=args.self_collision,
@@ -631,8 +644,13 @@ if args.layout:
             solid_hoop=args.solid_hoop,
             filtering_offset=(None if state["filtering"] < 0
                               else state["filtering"]))
+        if args.bend_in > 0:
+            _benders.append((_rings, _goal))
         state["n_ducts"] = _i + 1
     _refresh_dragger()
+    if _benders:
+        print(f"[bend] built straight; {len(_benders)} duct(s) will bend into "
+              f"the layout over {args.bend_in} steps", flush=True)
 else:
     for _ in range(int(args.spawn_on_start)):
         do_spawn(args.length)
@@ -835,6 +853,23 @@ while app.is_running():
                           flush=True)
         except Exception:
             pass
+    if _benders and step == 30 and not state.get("bend_started"):
+        # AFTER warm-up. A RigidPrim built before physics has run reports
+        # authored poses forever and poisons every later read.
+        state["bend_started"] = True
+        from duct_sim.bend import Bender  # noqa: E402
+        state["bend"] = [Bender(stage, r, g, steps=args.bend_in)
+                         for r, g in _benders]
+        state["dragger"] = None            # rebuilt once the bend finishes
+    if state.get("bend"):
+        _alive = [b for b in state["bend"] if b.update()]
+        if not _alive:
+            state["bend"] = None
+            print("[bend] done; the corners are now solver output, "
+                  "not mesh output", flush=True)
+            _refresh_dragger()
+        else:
+            state["bend"] = _alive
     _a = time.perf_counter()
     sim.step(render=True)
     _acc += time.perf_counter() - _a

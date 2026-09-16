@@ -78,6 +78,27 @@ class HoopDragger:
         if self._view is None:
             from isaacsim.core.prims import RigidPrim
             self._view = RigidPrim(self.ring_paths)
+            # INITIALIZE, or every pose reads back as the origin. Without this
+            # get_world_poses() returned (0,0,0) for all 819 hoops, so every
+            # hoop projected to the same pixel and the pick always landed on
+            # index 0 -- which is exactly what "it grabs the wrong hoop" was,
+            # for both the ray version and the screen-space version. Two
+            # rewrites went into the coordinate maths for a bug that was never
+            # in the coordinate maths.
+            try:
+                self._view.initialize()
+            except Exception as exc:
+                print(f"[drag] view initialize failed: {exc}", flush=True)
+
+            # and CHECK it took, rather than assume
+            p = self._positions()
+            spread = float(np.ptp(p, axis=0).max()) if len(p) else 0.0
+            if spread < 1e-6:
+                print(f"[drag] WARNING hoop poses have zero spread "
+                      f"({len(p)} hoops all at the same point) -- picking "
+                      f"cannot work", flush=True)
+            else:
+                print(f"[drag] hoop poses span {spread:.2f} m", flush=True)
         return self._view
 
     def _shift_down(self):
@@ -138,6 +159,57 @@ class HoopDragger:
             return True
         except Exception:
             return False
+
+    def _screen_positions(self):
+        """Hoop centres in WINDOW pixels, via the viewport's own projection.
+
+        Building a world ray from carb's normalized mouse coords cannot be made
+        to work: those are normalized to the WINDOW, while the 3D viewport is a
+        sub-rectangle of it (toolbars left and top, panels right and bottom).
+        The ray is therefore offset by however large those panels are, measured
+        as a 23-51 cm miss at the duct, and it always grabbed whichever hoop
+        happened to sit near the centre of that offset.
+
+        Project the other way instead: world -> NDC through
+        viewport_api.world_to_ndc, then NDC -> window pixels through the frame
+        rectangle. That is exactly what omni.kit.viewport.utility's
+        get_ui_position_for_prim does, so the result lands in the same space
+        carb reports the cursor in, and no focal length, aperture or panel size
+        has to be guessed.
+        """
+        try:
+            import omni.ui
+            from omni.kit.viewport.utility import get_active_viewport_window
+            win = get_active_viewport_window()
+            if win is None:
+                return None
+            vp = win.viewport_api
+            mvp = vp.world_to_ndc
+            frame = win.frame
+
+            dpi = omni.ui.Workspace.get_dpi_scale() or 1.0
+            splitter = 4 * dpi                      # kit's dock splitter
+            tab_h = 0
+            if win.dock_tab_bar_visible or not (win.flags & omni.ui.WINDOW_FLAGS_NO_TITLE_BAR):
+                tab_h = 22 * dpi
+
+            out = np.full((len(self.ring_paths), 2), np.inf, dtype=np.float64)
+            for i, p in enumerate(self._positions()):
+                ndc = mvp.Transform(Gf.Vec3d(float(p[0]), float(p[1]), float(p[2])))
+                if ndc[2] < 0:                      # behind the camera
+                    continue
+                x = (ndc[0] + 1.0) * 0.5
+                y = 1.0 - (ndc[1] + 1.0) * 0.5
+                out[i, 0] = dpi * (frame.screen_position_x + x * frame.computed_width) - splitter
+                out[i, 1] = (dpi * (frame.screen_position_y + y * frame.computed_height)
+                             - tab_h - splitter)
+            return out
+        except Exception as exc:
+            if not getattr(self, "_warned_screen", False):
+                self._warned_screen = True
+                print(f"[drag] screen projection unavailable ({exc}); "
+                      f"falling back to the ray", flush=True)
+            return None
 
     def _eye(self):
         try:
@@ -238,7 +310,54 @@ class HoopDragger:
             # WINDOW pixels. So the pick stayed pending forever and no force was
             # ever applied. The query is now only a refinement on top of a pick
             # that has already succeeded.
-            ray = self._camera_ray()
+            # FIRST: pick in screen space. This is the one that is correct --
+            # it uses the viewport's own projection, so it needs no assumption
+            # about where the viewport sits inside the window.
+            scr = self._screen_positions()
+            if scr is not None:
+                mx, my = self._input.get_mouse_coords_pixel(self._mouse)
+                d = np.linalg.norm(scr - np.array([mx, my], dtype=np.float64), axis=1)
+                if not getattr(self, "_dumped", False):
+                    # ONE-SHOT DIAGNOSTIC. The first screen-space attempt still
+                    # grabbed a hoop 535 px away and always index 0, which says
+                    # the projection is landing somewhere wrong rather than
+                    # being slightly off. Print the spaces involved instead of
+                    # guessing which one is at fault.
+                    self._dumped = True
+                    fin = np.isfinite(scr[:, 0])
+                    print(f"[drag/dbg] cursor px=({mx:.0f}, {my:.0f})", flush=True)
+                    print(f"[drag/dbg] hoops finite {int(fin.sum())}/{len(scr)}",
+                          flush=True)
+                    if fin.any():
+                        f = scr[fin]
+                        print(f"[drag/dbg] projected x {f[:,0].min():.0f}..{f[:,0].max():.0f}  "
+                              f"y {f[:,1].min():.0f}..{f[:,1].max():.0f}", flush=True)
+                        print(f"[drag/dbg] nearest {d[np.argmin(d)]:.0f} px, "
+                              f"farthest {np.nanmax(d[np.isfinite(d)]):.0f} px", flush=True)
+                    try:
+                        import omni.ui
+                        from omni.kit.viewport.utility import get_active_viewport_window
+                        w = get_active_viewport_window()
+                        fr = w.frame
+                        print(f"[drag/dbg] frame screen=({fr.screen_position_x:.0f}, "
+                              f"{fr.screen_position_y:.0f}) size=({fr.computed_width:.0f}, "
+                              f"{fr.computed_height:.0f}) dpi={omni.ui.Workspace.get_dpi_scale():.2f} "
+                              f"tab={w.dock_tab_bar_visible}", flush=True)
+                        print(f"[drag/dbg] viewport resolution={w.viewport_api.resolution}",
+                              flush=True)
+                    except Exception as exc:
+                        print(f"[drag/dbg] frame unavailable: {exc}", flush=True)
+                i = int(np.argmin(d))
+                if np.isfinite(d[i]):
+                    self._held = i
+                    eye = self._eye()
+                    pos = self._positions()[i]
+                    self._depth = (float(np.linalg.norm(pos - eye))
+                                   if eye is not None else 1.0)
+                    print(f"[drag] grabbed {self.ring_paths[i]} "
+                          f"({d[i]:.0f} px from the cursor)", flush=True)
+
+            ray = self._camera_ray() if self._held is None else None
             if ray is not None:
                 eye, d = ray
                 pos = self._positions()

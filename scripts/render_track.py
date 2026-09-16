@@ -21,6 +21,8 @@ ap.add_argument("--out", default="/tmp/track_render")
 ap.add_argument("--settle", type=int, default=200)
 ap.add_argument("--shrink-rest", type=float, default=0.0)
 ap.add_argument("--n-circ", type=int, default=40)
+ap.add_argument("--spacing", type=float, default=0.0,
+                help="hoop spacing override; 0 = take it from the layout")
 ap.add_argument("--clearance", type=float, default=-0.004)
 ap.add_argument("--res", type=int, default=1600)
 ap.add_argument("--views", default="top,iso",
@@ -75,7 +77,8 @@ doc = load(args.layout)
 spec = DuctSpec()
 xs, ys = [], []
 for i, run in enumerate(doc["runs"]):
-    stations = resample(run["points"], doc.get("duct", {}).get("hoop_spacing", 0.05))
+    stations = resample(run["points"],
+                        args.spacing or doc.get("duct", {}).get("hoop_spacing", 0.05))
     xs += [s[0] for s in stations]
     ys += [s[1] for s in stations]
     spawn_duct_path(stage, i, stations, spec, MAT,
